@@ -1,21 +1,24 @@
 """
 ==============================================================
  analysis_mpi.py
- MPI Traffic Simulation - Performance Analysis & Comparison
+ Serial / OpenMP / MPI Traffic Simulation — Full Comparison
  Group 10 | EE7218/EC7207 High Performance Computing
 
  Reads:
-   ../serial_output.txt          -> serial execution time
-   ../traffic_values.txt         -> serial final traffic grid
-   ../openmp/openmp_performance.txt -> OpenMP timing (for tri-comparison)
+   ../serial_output.txt             -> serial execution time
+   ../traffic_values.txt            -> serial final traffic grid
+   ../openmp/openmp_performance.txt -> OpenMP timing (all schedules)
    ../openmp/openmp_traffic_values.txt -> OpenMP final grid
-   mpi_performance.txt           -> MPI timing (all np values)
-   mpi_traffic_values.txt        -> MPI final traffic grid
+   mpi_performance.txt              -> MPI timing (all np values)
+   mpi_traffic_values.txt           -> MPI final traffic grid
 
  Generates:
-   mpi_heatmap_comparison.png    -> Serial / OpenMP / MPI side-by-side
-   mpi_performance_analysis.png  -> Speedup, efficiency, timing (4 panels)
-   mpi_full_report.png           -> Combined 6-panel report for submission
+   mpi_heatmap_comparison.png   -> Serial / OpenMP / MPI side-by-side
+   mpi_3way_comparison.png      -> Dedicated 3-way performance comparison
+                                   (speedup vs serial baseline, efficiency,
+                                    timing, summary table for all 3 impls)
+   mpi_performance_analysis.png -> MPI detail + OMP overlay (4 panels)
+   mpi_full_report.png          -> Combined 6-panel report for submission
 
  Run:
    python3 analysis_mpi.py
@@ -249,169 +252,337 @@ def plot_heatmaps(serial_grid, omp_grid, mpi_grid,
 
 
 # =============================================================================
-# Figure 2: MPI Performance Analysis (4 panels)
+# Figure 2: Dedicated 3-way comparison (Serial | OpenMP all schedules | MPI)
+# =============================================================================
+
+# Colour / marker scheme shared by Figure 2 and Figure 3
+_C = {
+    'serial':   '#D32F2F',
+    'static':   '#1976D2',
+    'dynamic':  '#F57C00',
+    'collapse': '#388E3C',
+    'mpi':      '#7B1FA2',
+    'ideal':    '#555555',
+}
+_M = {'static': 'o', 'dynamic': 's', 'collapse': '^', 'mpi': 'D'}
+
+
+def _omp_speedup_vs_serial(omp_perf, serial_time):
+    """Return {sched: (threads_list, speedup_vs_serial_list, efficiency_list)}."""
+    out = {}
+    if not serial_time:
+        return out
+    for sched, data in omp_perf.items():
+        ts  = [d[0] for d in data]
+        sp  = [serial_time / d[1] for d in data]
+        eff = [serial_time / (d[1] * d[0]) for d in data]
+        out[sched] = (ts, sp, eff)
+    return out
+
+
+def _mpi_speedup_vs_serial(mpi_records, serial_time):
+    """Return (np_list, speedup_vs_serial_list, efficiency_list)."""
+    if not serial_time or not mpi_records:
+        return [], [], []
+    np_vals = [r['np']   for r in mpi_records]
+    sp      = [serial_time / r['time'] for r in mpi_records]
+    eff     = [serial_time / (r['time'] * r['np']) for r in mpi_records]
+    return np_vals, sp, eff
+
+
+def plot_3way_comparison(mpi_records, omp_perf, serial_time,
+                         outfile='mpi_3way_comparison.png'):
+    """
+    Dedicated 4-panel figure comparing all three implementations.
+      (a) Execution time  — serial hline + all OMP schedules + MPI
+      (b) Speedup         — T_serial / T_N  for OMP and MPI
+      (c) Parallel efficiency — (T_serial / T_N) / N
+      (d) Summary table   — all configs in one view
+    """
+    thread_configs = [1, 2, 4, 8]
+
+    omp_sp_data  = _omp_speedup_vs_serial(omp_perf, serial_time)
+    mpi_np, mpi_sp, mpi_eff = _mpi_speedup_vs_serial(mpi_records, serial_time)
+    mpi_times = [r['time'] for r in mpi_records]
+
+    fig, axes = plt.subplots(2, 2, figsize=(15, 11))
+    fig.suptitle(
+        'Serial  |  OpenMP  |  MPI — 3-Way Performance Comparison\n'
+        'Group 10 | Grid: 200×200 | Lanes: 3 | Time Steps: 200',
+        fontsize=13, fontweight='bold')
+
+    ax_t, ax_sp = axes[0]
+    ax_ef, ax_tb = axes[1]
+
+    # ── (a) Execution Time ───────────────────────────────────────────────────
+    ax_t.set_title('(a) Execution Time vs Parallelism Level',
+                   fontsize=10, fontweight='bold')
+    if serial_time:
+        ax_t.axhline(serial_time, color=_C['serial'], lw=2.5, ls='--',
+                     label=f'Serial  ({serial_time:.4f} s)', zorder=5)
+    for sched, data in sorted(omp_perf.items()):
+        ts = [d[0] for d in data]
+        tm = [d[1] for d in data]
+        ax_t.plot(ts, tm, color=_C[sched], marker=_M[sched],
+                  lw=2, ms=8, label=f'OMP {sched}')
+        for x, y in zip(ts, tm):
+            ax_t.annotate(f'{y:.4f}', (x, y),
+                          textcoords='offset points', xytext=(4, 3),
+                          fontsize=7, color=_C[sched])
+    if mpi_np:
+        ax_t.plot(mpi_np, mpi_times, color=_C['mpi'], marker=_M['mpi'],
+                  lw=2.5, ms=10, label='MPI', zorder=4)
+        for x, y in zip(mpi_np, mpi_times):
+            ax_t.annotate(f'{y:.4f}', (x, y),
+                          textcoords='offset points', xytext=(4, -12),
+                          fontsize=7, color=_C['mpi'])
+    ax_t.set_xlabel('Threads (OMP) / Processes (MPI)', fontsize=9)
+    ax_t.set_ylabel('Execution Time (s)', fontsize=9)
+    ax_t.set_xticks(thread_configs)
+    ax_t.set_xlim(0.5, 9)
+    ax_t.legend(fontsize=8)
+    ax_t.grid(True, alpha=0.3)
+
+    # ── (b) Speedup vs Serial Baseline ───────────────────────────────────────
+    ax_sp.set_title('(b) Speedup vs Serial Baseline  (T_serial / T_N)',
+                    fontsize=10, fontweight='bold')
+    ax_sp.plot(thread_configs, thread_configs, color=_C['ideal'], lw=1.5,
+               ls='--', alpha=0.55, label='Ideal (linear)')
+    ax_sp.axhline(1.0, color=_C['serial'], lw=1.5, ls=':',
+                  alpha=0.6, label='Serial baseline  (1×)')
+    for sched, (ts, sp, _) in sorted(omp_sp_data.items()):
+        ax_sp.plot(ts, sp, color=_C[sched], marker=_M[sched],
+                   lw=2, ms=8, label=f'OMP {sched}')
+        for x, y in zip(ts, sp):
+            ax_sp.annotate(f'{y:.2f}×', (x, y),
+                           textcoords='offset points', xytext=(4, 3), fontsize=7)
+    if mpi_np:
+        ax_sp.plot(mpi_np, mpi_sp, color=_C['mpi'], marker=_M['mpi'],
+                   lw=2.5, ms=10, label='MPI', zorder=4)
+        for x, y in zip(mpi_np, mpi_sp):
+            ax_sp.annotate(f'{y:.2f}×', (x, y),
+                           textcoords='offset points', xytext=(4, -12), fontsize=7)
+    ax_sp.set_xlabel('Threads (OMP) / Processes (MPI)', fontsize=9)
+    ax_sp.set_ylabel('Speedup  =  T_serial / T_N', fontsize=9)
+    ax_sp.set_xticks(thread_configs)
+    ax_sp.set_xlim(0.5, 9)
+    ax_sp.legend(fontsize=8)
+    ax_sp.grid(True, alpha=0.3)
+
+    # ── (c) Efficiency vs Serial Baseline ────────────────────────────────────
+    ax_ef.set_title('(c) Parallel Efficiency  (T_serial / (N × T_N))',
+                    fontsize=10, fontweight='bold')
+    ax_ef.axhline(1.0, color=_C['ideal'], lw=1.5, ls='--',
+                  alpha=0.55, label='Ideal (100%)')
+    for sched, (ts, _, eff) in sorted(omp_sp_data.items()):
+        ax_ef.plot(ts, eff, color=_C[sched], marker=_M[sched],
+                   lw=2, ms=8, label=f'OMP {sched}')
+        for x, y in zip(ts, eff):
+            ax_ef.annotate(f'{y:.2f}\n({y*100:.0f}%)', (x, y),
+                           textcoords='offset points', xytext=(0, 8),
+                           ha='center', fontsize=7)
+    if mpi_np:
+        ax_ef.plot(mpi_np, mpi_eff, color=_C['mpi'], marker=_M['mpi'],
+                   lw=2.5, ms=10, label='MPI', zorder=4)
+        for x, y in zip(mpi_np, mpi_eff):
+            ax_ef.annotate(f'{y:.2f}\n({y*100:.0f}%)', (x, y),
+                           textcoords='offset points', xytext=(0, -18),
+                           ha='center', fontsize=7)
+    ax_ef.set_xlabel('Threads (OMP) / Processes (MPI)', fontsize=9)
+    ax_ef.set_ylabel('Efficiency  =  T_serial / (N × T_N)', fontsize=9)
+    ax_ef.set_xticks(thread_configs)
+    ax_ef.set_ylim(0, 1.5)
+    ax_ef.set_xlim(0.5, 9)
+    ax_ef.legend(fontsize=8)
+    ax_ef.grid(True, alpha=0.3)
+
+    # ── (d) Summary comparison table ─────────────────────────────────────────
+    ax_tb.set_title('(d) 3-Way Summary Table', fontsize=10, fontweight='bold')
+    ax_tb.axis('off')
+
+    rows = []
+    if serial_time:
+        rows.append(('Serial', 1, f'{serial_time:.6f}', '1.0000×', '1.0000',
+                     _C['serial']))
+    for sched in sorted(omp_perf.keys()):
+        for nt, tm, _, _ in omp_perf[sched]:
+            sp  = serial_time / tm if serial_time else float('nan')
+            eff = sp / nt
+            rows.append((f'OMP {sched}', nt, f'{tm:.6f}',
+                         f'{sp:.4f}×', f'{eff:.4f}', _C[sched]))
+    for r in mpi_records:
+        sp  = serial_time / r['time'] if serial_time else float('nan')
+        eff = sp / r['np']
+        rows.append(('MPI', r['np'], f'{r["time"]:.6f}',
+                     f'{sp:.4f}×', f'{eff:.4f}', _C['mpi']))
+
+    col_labels = ['Impl', 'N', 'Time (s)', 'Speedup\nvs Serial', 'Efficiency']
+    cell_text  = [[r[0], r[1], r[2], r[3], r[4]] for r in rows]
+    cell_colors = [[r[5] + '22'] * 5 for r in rows]   # light tint
+
+    tbl = ax_tb.table(
+        cellText=cell_text,
+        colLabels=col_labels,
+        cellColours=cell_colors,
+        cellLoc='center',
+        loc='center')
+    tbl.auto_set_font_size(False)
+    tbl.set_fontsize(8)
+    tbl.scale(1.15, 1.5)
+    for (row, col), cell in tbl.get_celld().items():
+        if row == 0:
+            cell.set_facecolor('#eeeeee')
+            cell.set_text_props(fontweight='bold')
+
+    plt.tight_layout()
+    plt.savefig(outfile, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"  Saved: {outfile}")
+
+
+# =============================================================================
+# Figure 3: MPI-only detail analysis (4 panels)
 # =============================================================================
 
 def plot_performance(mpi_records, serial_time, omp_perf,
                      outfile='mpi_performance_analysis.png'):
-
+    """4-panel MPI detail view with all OMP schedules overlaid."""
     if not mpi_records:
         print("  [WARN] No MPI performance data — skipping performance plot.")
         return
 
-    np_vals   = [r['np']         for r in mpi_records]
-    times     = [r['time']       for r in mpi_records]
-    speedups  = [r['speedup']    for r in mpi_records]
-    effics    = [r['efficiency'] for r in mpi_records]
-
-    MPI_COLOR = '#7B1FA2'   # purple for MPI
-    OMP_COLOR = '#1976D2'   # blue for OpenMP static
-    SER_COLOR = '#D32F2F'   # red for serial
-    IDEAL_COL = '#555555'
+    np_vals  = [r['np']   for r in mpi_records]
+    times    = [r['time'] for r in mpi_records]
+    # Internal MPI speedup (T_mpi_1 / T_mpi_n)
+    int_sp   = [r['speedup']    for r in mpi_records]
+    int_eff  = [r['efficiency'] for r in mpi_records]
+    # Cross-impl speedup (T_serial / T_mpi_n)
+    ser_sp   = ([serial_time / t for t in times] if serial_time else int_sp)
+    ser_eff  = ([serial_time / (t * n) for t, n in zip(times, np_vals)]
+                if serial_time else int_eff)
 
     thread_configs = [1, 2, 4, 8]
 
     fig, axes = plt.subplots(2, 2, figsize=(15, 11))
     fig.suptitle(
-        'MPI Traffic Simulation — Performance Analysis\n'
+        'MPI Traffic Simulation — Detailed Performance Analysis\n'
         'Group 10 | Grid: 200×200 | Lanes: 3 | Time Steps: 200',
         fontsize=13, fontweight='bold')
 
-    ax_t  = axes[0][0]
-    ax_sp = axes[0][1]
-    ax_ef = axes[1][0]
-    ax_sm = axes[1][1]
+    ax_t, ax_sp = axes[0]
+    ax_ef, ax_sm = axes[1]
 
-    # ── (a) Execution Time ───────────────────────────────────────────────────
-    ax_t.set_title('(a) Execution Time vs Process Count',
+    # ── (a) Execution Time — all 3 implementations ───────────────────────────
+    ax_t.set_title('(a) Execution Time  [Serial | OpenMP | MPI]',
                    fontsize=10, fontweight='bold')
-
     if serial_time:
-        ax_t.axhline(serial_time, color=SER_COLOR, lw=2, ls='--',
-                     label=f'Serial baseline  ({serial_time:.4f} s)', zorder=5)
-
-    ax_t.plot(np_vals, times, color=MPI_COLOR, marker='D',
-              lw=2.5, ms=9, label='MPI', zorder=4)
+        ax_t.axhline(serial_time, color=_C['serial'], lw=2.5, ls='--',
+                     label=f'Serial  ({serial_time:.4f} s)', zorder=5)
+    for sched, data in sorted(omp_perf.items()):
+        ts = [d[0] for d in data]
+        tm = [d[1] for d in data]
+        ax_t.plot(ts, tm, color=_C[sched], marker=_M[sched],
+                  lw=1.8, ms=7, ls=':', label=f'OMP {sched}')
+    ax_t.plot(np_vals, times, color=_C['mpi'], marker=_M['mpi'],
+              lw=2.5, ms=10, label='MPI', zorder=4)
     for x, y in zip(np_vals, times):
         ax_t.annotate(f'{y:.4f}s', (x, y),
                       textcoords='offset points', xytext=(5, 4),
-                      fontsize=8, color=MPI_COLOR)
-
-    # OpenMP static overlay
-    if 'static' in omp_perf:
-        omp_ts = [d[0] for d in omp_perf['static']]
-        omp_tm = [d[1] for d in omp_perf['static']]
-        ax_t.plot(omp_ts, omp_tm, color=OMP_COLOR, marker='o',
-                  lw=2, ms=8, ls=':', label='OMP static (reference)', zorder=3)
-
-    ax_t.set_xlabel('Number of Processes (MPI) / Threads (OMP)', fontsize=9)
+                      fontsize=8, color=_C['mpi'])
+    ax_t.set_xlabel('Threads (OMP) / Processes (MPI)', fontsize=9)
     ax_t.set_ylabel('Execution Time (s)', fontsize=9)
     ax_t.set_xticks(thread_configs)
-    ax_t.legend(fontsize=8)
-    ax_t.grid(True, alpha=0.3)
     ax_t.set_xlim(0.5, 9)
+    ax_t.legend(fontsize=7.5)
+    ax_t.grid(True, alpha=0.3)
 
-    # ── (b) Speedup ──────────────────────────────────────────────────────────
-    ax_sp.set_title('(b) Speedup vs Process Count',
+    # ── (b) Speedup — both internal and vs serial ────────────────────────────
+    ax_sp.set_title('(b) Speedup  [all 3 implementations vs serial baseline]',
                     fontsize=10, fontweight='bold')
-
-    # Ideal linear speedup
-    ideal_x = np.array(thread_configs)
-    ax_sp.plot(ideal_x, ideal_x, color=IDEAL_COL, lw=1.5, ls='--',
-               alpha=0.6, label='Ideal (linear)')
-
-    # MPI speedup (relative to np=1)
-    ax_sp.plot(np_vals, speedups, color=MPI_COLOR, marker='D',
-               lw=2.5, ms=9, label='MPI (T₁/Tₙ)')
-    for x, y in zip(np_vals, speedups):
+    ax_sp.plot(thread_configs, thread_configs, color=_C['ideal'], lw=1.5,
+               ls='--', alpha=0.55, label='Ideal (linear)')
+    ax_sp.axhline(1.0, color=_C['serial'], lw=1.5, ls=':',
+                  alpha=0.6, label='Serial (1×)')
+    # All OMP schedules vs serial
+    for sched, data in sorted(omp_perf.items()):
+        ts = [d[0] for d in data]
+        sp = [serial_time / d[1] for d in data] if serial_time else [d[2] for d in data]
+        ax_sp.plot(ts, sp, color=_C[sched], marker=_M[sched],
+                   lw=1.8, ms=7, ls=':', label=f'OMP {sched}')
+    # MPI vs serial (solid) and MPI internal (dashed)
+    ax_sp.plot(np_vals, ser_sp, color=_C['mpi'], marker=_M['mpi'],
+               lw=2.5, ms=10, label='MPI vs serial', zorder=4)
+    ax_sp.plot(np_vals, int_sp, color=_C['mpi'], marker=_M['mpi'],
+               lw=1.5, ms=7, ls='--', alpha=0.6, label='MPI internal (T₁/Tₙ)')
+    for x, y in zip(np_vals, ser_sp):
         ax_sp.annotate(f'{y:.2f}×', (x, y),
                        textcoords='offset points', xytext=(5, 4), fontsize=8)
-
-    # MPI speedup vs serial
-    if serial_time:
-        sp_vs_serial = [serial_time / t for t in times]
-        ax_sp.plot(np_vals, sp_vs_serial, color=MPI_COLOR, marker='D',
-                   lw=1.5, ms=6, ls=':', alpha=0.7,
-                   label='MPI (vs serial baseline)')
-
-    # OpenMP static speedup overlay
-    if 'static' in omp_perf:
-        omp_ts = [d[0] for d in omp_perf['static']]
-        omp_sp = [d[2] for d in omp_perf['static']]
-        ax_sp.plot(omp_ts, omp_sp, color=OMP_COLOR, marker='o',
-                   lw=2, ms=8, ls=':', label='OMP static (T₁/Tₙ)')
-
-    ax_sp.set_xlabel('Number of Processes (MPI) / Threads (OMP)', fontsize=9)
-    ax_sp.set_ylabel('Speedup  (T₁ / Tₙ)', fontsize=9)
+    ax_sp.set_xlabel('Threads (OMP) / Processes (MPI)', fontsize=9)
+    ax_sp.set_ylabel('Speedup  =  T_serial / T_N', fontsize=9)
     ax_sp.set_xticks(thread_configs)
+    ax_sp.set_xlim(0.5, 9)
     ax_sp.legend(fontsize=7.5, ncol=2)
     ax_sp.grid(True, alpha=0.3)
-    ax_sp.set_xlim(0.5, 9)
 
-    # ── (c) Efficiency ───────────────────────────────────────────────────────
-    ax_ef.set_title('(c) Parallel Efficiency vs Process Count',
+    # ── (c) Efficiency — all 3 ───────────────────────────────────────────────
+    ax_ef.set_title('(c) Parallel Efficiency  [all 3 implementations]',
                     fontsize=10, fontweight='bold')
-
-    ax_ef.axhline(1.0, color=IDEAL_COL, lw=1.5, ls='--',
-                  alpha=0.6, label='Ideal efficiency (100%)')
-
-    ax_ef.plot(np_vals, effics, color=MPI_COLOR, marker='D',
-               lw=2.5, ms=9, label='MPI')
-    for x, y in zip(np_vals, effics):
+    ax_ef.axhline(1.0, color=_C['ideal'], lw=1.5, ls='--',
+                  alpha=0.55, label='Ideal (100%)')
+    for sched, data in sorted(omp_perf.items()):
+        ts  = [d[0] for d in data]
+        eff = ([serial_time / (d[1] * d[0]) for d in data]
+               if serial_time else [d[3] for d in data])
+        ax_ef.plot(ts, eff, color=_C[sched], marker=_M[sched],
+                   lw=1.8, ms=7, ls=':', label=f'OMP {sched}')
+    ax_ef.plot(np_vals, ser_eff, color=_C['mpi'], marker=_M['mpi'],
+               lw=2.5, ms=10, label='MPI', zorder=4)
+    for x, y in zip(np_vals, ser_eff):
         ax_ef.annotate(f'{y:.2f}\n({y*100:.0f}%)', (x, y),
                        textcoords='offset points', xytext=(0, 9),
                        ha='center', fontsize=8)
-
-    if 'static' in omp_perf:
-        omp_ts  = [d[0] for d in omp_perf['static']]
-        omp_eff = [d[3] for d in omp_perf['static']]
-        ax_ef.plot(omp_ts, omp_eff, color=OMP_COLOR, marker='o',
-                   lw=2, ms=8, ls=':', label='OMP static')
-
-    ax_ef.set_xlabel('Number of Processes (MPI) / Threads (OMP)', fontsize=9)
-    ax_ef.set_ylabel('Efficiency = Speedup / N', fontsize=9)
+    ax_ef.set_xlabel('Threads (OMP) / Processes (MPI)', fontsize=9)
+    ax_ef.set_ylabel('Efficiency  =  T_serial / (N × T_N)', fontsize=9)
     ax_ef.set_xticks(thread_configs)
-    ax_ef.set_ylim(0, 1.45)
+    ax_ef.set_ylim(0, 1.5)
+    ax_ef.set_xlim(0.5, 9)
     ax_ef.legend(fontsize=8)
     ax_ef.grid(True, alpha=0.3)
-    ax_ef.set_xlim(0.5, 9)
 
-    # ── (d) Summary Text Box ─────────────────────────────────────────────────
+    # ── (d) MPI summary text ──────────────────────────────────────────────────
     ax_sm.set_title('(d) MPI Performance Summary', fontsize=10, fontweight='bold')
     ax_sm.axis('off')
 
-    base_t = mpi_records[0]['time'] if mpi_records else None
     best_r = min(mpi_records, key=lambda r: r['time']) if mpi_records else None
-
     lines = [
-        '┌────────────────────────────────────────────────┐',
-        '│   MPI PERFORMANCE SUMMARY   (Group 10)        │',
-        '├─────────────┬────────────┬──────────┬─────────┤',
-        '│  Processes  │  Time (s)  │  Speedup │  Effic. │',
-        '├─────────────┼────────────┼──────────┼─────────┤',
+        '┌────────────────────────────────────────────────────┐',
+        '│   MPI PERFORMANCE SUMMARY   (Group 10)            │',
+        '├──────────┬────────────┬────────────┬──────────────┤',
+        '│  Procs   │  Time (s)  │  Sp (int.) │  Sp (serial) │',
+        '├──────────┼────────────┼────────────┼──────────────┤',
     ]
-    for r in mpi_records:
+    for r, ss in zip(mpi_records, ser_sp):
         lines.append(
-            f'│  {r["np"]:<11d}│  {r["time"]:<10.6f}│  {r["speedup"]:<8.4f}│'
-            f'  {r["efficiency"]:.4f}  │')
-    lines.append('└─────────────┴────────────┴──────────┴─────────┘')
-    lines.append('')
+            f'│  {r["np"]:<7d}│  {r["time"]:<10.6f}│  '
+            f'{r["speedup"]:<10.4f}│  {ss:<12.4f}│')
+    lines.append('└──────────┴────────────┴────────────┴──────────────┘')
     if serial_time and best_r:
-        sp_ser = serial_time / best_r['time']
+        best_ser_sp = serial_time / best_r['time']
         lines += [
-            f'  Serial baseline    : {serial_time:.6f} s',
-            f'  MPI best time      : {best_r["time"]:.6f} s  (np={best_r["np"]})',
-            f'  Speedup vs serial  : {sp_ser:.4f} ×',
+            '',
+            f'  Serial baseline   : {serial_time:.6f} s',
+            f'  MPI best          : {best_r["time"]:.6f} s  (np={best_r["np"]})',
+            f'  Speedup vs serial : {best_ser_sp:.4f} ×',
             '',
         ]
     lines += [
-        '  Communication pattern:',
+        '  MPI design notes:',
         '  • 1-D row decomposition across processes',
         '  • Non-blocking halo exchange (MPI_Isend/Irecv)',
         '  • MPI_Scatterv / MPI_Gatherv for data I/O',
-        '  • MPI_Reduce for global min / max / avg',
+        '  • MPI_Reduce for global statistics',
+        '  • MPI_Barrier + MPI_Wtime for accurate timing',
     ]
-
     ax_sm.text(0.02, 0.97, '\n'.join(lines),
                transform=ax_sm.transAxes,
                fontsize=8, verticalalignment='top',
@@ -426,7 +597,7 @@ def plot_performance(mpi_records, serial_time, omp_perf,
 
 
 # =============================================================================
-# Figure 3: Full 6-panel Report
+# Figure 4: Full 6-panel Report
 # =============================================================================
 
 def plot_full_report(serial_grid, omp_grid, mpi_grid,
@@ -434,13 +605,8 @@ def plot_full_report(serial_grid, omp_grid, mpi_grid,
                      rmse_omp, rmse_mpi,
                      outfile='mpi_full_report.png'):
 
-    MPI_COLOR  = '#7B1FA2'
-    OMP_COLOR  = '#1976D2'
-    SER_COLOR  = '#D32F2F'
-    IDEAL_COL  = '#555555'
-
-    np_vals  = [r['np']         for r in mpi_records] if mpi_records else []
-    times    = [r['time']       for r in mpi_records] if mpi_records else []
+    np_vals  = [r['np']   for r in mpi_records] if mpi_records else []
+    times    = [r['time'] for r in mpi_records] if mpi_records else []
     speedups = [r['speedup']    for r in mpi_records] if mpi_records else []
     effics   = [r['efficiency'] for r in mpi_records] if mpi_records else []
 
@@ -500,77 +666,85 @@ def plot_full_report(serial_grid, omp_grid, mpi_grid,
                    ha='center', va='center', transform=ax_mh.transAxes, color='gray')
     ax_mh.set_xlabel('Column'); ax_mh.set_ylabel('Row')
 
-    # ── (c) Speedup ──────────────────────────────────────────────────────────
-    ax_sp.set_title('(c) Speedup vs Process/Thread Count', fontsize=11, fontweight='bold')
-    ax_sp.plot(thread_configs, thread_configs, color=IDEAL_COL, lw=1.5,
-               ls='--', alpha=0.6, label='Ideal (linear)')
+    # ── (c) Speedup vs serial — all 3 implementations ───────────────────────
+    ax_sp.set_title('(c) Speedup vs Serial Baseline  (T_serial / T_N)',
+                    fontsize=11, fontweight='bold')
+    ax_sp.plot(thread_configs, thread_configs, color=_C['ideal'], lw=1.5,
+               ls='--', alpha=0.55, label='Ideal (linear)')
+    ax_sp.axhline(1.0, color=_C['serial'], lw=1.5, ls=':',
+                  alpha=0.6, label='Serial (1×)')
+
+    for sched, data in sorted(omp_perf.items()):
+        ts = [d[0] for d in data]
+        sp = ([serial_time / d[1] for d in data]
+              if serial_time else [d[2] for d in data])
+        ax_sp.plot(ts, sp, color=_C[sched], marker=_M[sched],
+                   lw=1.8, ms=7, ls=':', label=f'OMP {sched}')
 
     if np_vals:
-        ax_sp.plot(np_vals, speedups, color=MPI_COLOR, marker='D',
-                   lw=2.5, ms=9, label='MPI (T₁/Tₙ)')
-        for x, y in zip(np_vals, speedups):
-            ax_sp.annotate(f'{y:.2f}', (x, y),
+        mpi_ser_sp = ([serial_time / t for t in times]
+                      if serial_time else speedups)
+        ax_sp.plot(np_vals, mpi_ser_sp, color=_C['mpi'], marker=_M['mpi'],
+                   lw=2.5, ms=9, label='MPI', zorder=4)
+        for x, y in zip(np_vals, mpi_ser_sp):
+            ax_sp.annotate(f'{y:.2f}×', (x, y),
                            textcoords='offset points', xytext=(5, 4), fontsize=8.5)
 
-    if 'static' in omp_perf:
-        omp_ts = [d[0] for d in omp_perf['static']]
-        omp_sp = [d[2] for d in omp_perf['static']]
-        ax_sp.plot(omp_ts, omp_sp, color=OMP_COLOR, marker='o',
-                   lw=2.5, ms=9, label='OMP static')
-
     ax_sp.set_xlabel('Processes (MPI) / Threads (OMP)', fontsize=10)
-    ax_sp.set_ylabel('Speedup  (T₁ / Tₙ)', fontsize=10)
+    ax_sp.set_ylabel('Speedup  =  T_serial / T_N', fontsize=10)
     ax_sp.set_xticks(thread_configs)
-    ax_sp.legend(fontsize=9)
+    ax_sp.legend(fontsize=8, ncol=2)
     ax_sp.grid(True, alpha=0.3)
     ax_sp.set_xlim(0.5, 9)
 
-    # ── (d) Efficiency ───────────────────────────────────────────────────────
-    ax_eff.set_title('(d) Parallel Efficiency', fontsize=11, fontweight='bold')
-    ax_eff.axhline(1.0, color=IDEAL_COL, lw=1.5, ls='--', alpha=0.6,
+    # ── (d) Efficiency — all 3 ────────────────────────────────────────────────
+    ax_eff.set_title('(d) Parallel Efficiency  (T_serial / (N × T_N))',
+                     fontsize=11, fontweight='bold')
+    ax_eff.axhline(1.0, color=_C['ideal'], lw=1.5, ls='--', alpha=0.55,
                    label='Ideal (100%)')
 
+    for sched, data in sorted(omp_perf.items()):
+        ts  = [d[0] for d in data]
+        eff = ([serial_time / (d[1] * d[0]) for d in data]
+               if serial_time else [d[3] for d in data])
+        ax_eff.plot(ts, eff, color=_C[sched], marker=_M[sched],
+                    lw=1.8, ms=7, ls=':', label=f'OMP {sched}')
+
     if np_vals:
-        ax_eff.plot(np_vals, effics, color=MPI_COLOR, marker='D',
-                    lw=2.5, ms=9, label='MPI')
-        for x, y in zip(np_vals, effics):
+        mpi_ser_eff = ([serial_time / (t * n) for t, n in zip(times, np_vals)]
+                       if serial_time else effics)
+        ax_eff.plot(np_vals, mpi_ser_eff, color=_C['mpi'], marker=_M['mpi'],
+                    lw=2.5, ms=9, label='MPI', zorder=4)
+        for x, y in zip(np_vals, mpi_ser_eff):
             ax_eff.annotate(f'{y:.2f}\n({y*100:.0f}%)', (x, y),
                             textcoords='offset points', xytext=(0, 9),
                             ha='center', fontsize=8)
 
-    if 'static' in omp_perf:
-        omp_ts  = [d[0] for d in omp_perf['static']]
-        omp_eff = [d[3] for d in omp_perf['static']]
-        ax_eff.plot(omp_ts, omp_eff, color=OMP_COLOR, marker='o',
-                    lw=2.5, ms=9, label='OMP static')
-
     ax_eff.set_xlabel('Processes (MPI) / Threads (OMP)', fontsize=10)
-    ax_eff.set_ylabel('Efficiency = Speedup / N', fontsize=10)
+    ax_eff.set_ylabel('Efficiency  =  T_serial / (N × T_N)', fontsize=10)
     ax_eff.set_xticks(thread_configs)
-    ax_eff.set_ylim(0, 1.45)
-    ax_eff.legend(fontsize=9)
+    ax_eff.set_ylim(0, 1.5)
+    ax_eff.legend(fontsize=8, ncol=2)
     ax_eff.grid(True, alpha=0.3)
     ax_eff.set_xlim(0.5, 9)
 
-    # ── (e) Timing Bar Chart ─────────────────────────────────────────────────
-    ax_bar.set_title('(e) Execution Time — All Configurations',
+    # ── (e) Timing Bar Chart — serial + ALL OMP schedules + MPI ──────────────
+    ax_bar.set_title('(e) Execution Time — All Configurations  [Serial | OMP | MPI]',
                      fontsize=11, fontweight='bold')
     labels, bar_times, bar_colors = [], [], []
 
     if serial_time:
-        labels.append('Serial\n(1P)'); bar_times.append(serial_time)
-        bar_colors.append(SER_COLOR)
+        labels.append('Serial\n1T'); bar_times.append(serial_time)
+        bar_colors.append(_C['serial'])
 
     for sched in sorted(omp_perf.keys()):
-        if sched != 'static':
-            continue
         for nt, tm, _, _ in omp_perf[sched]:
-            labels.append(f'OMP\nstatic\n{nt}T')
-            bar_times.append(tm); bar_colors.append(OMP_COLOR)
+            labels.append(f'OMP\n{sched}\n{nt}T')
+            bar_times.append(tm); bar_colors.append(_C[sched])
 
     for r in mpi_records:
         labels.append(f'MPI\n{r["np"]}P')
-        bar_times.append(r['time']); bar_colors.append(MPI_COLOR)
+        bar_times.append(r['time']); bar_colors.append(_C['mpi'])
 
     x_pos = range(len(labels))
     bars  = ax_bar.bar(x_pos, bar_times, color=bar_colors,
@@ -588,11 +762,13 @@ def plot_full_report(serial_grid, omp_grid, mpi_grid,
                     f'{t:.3f}', ha='center', va='bottom', fontsize=7, rotation=45)
 
     leg_patches = [
-        mpatches.Patch(color=SER_COLOR, label='Serial'),
-        mpatches.Patch(color=OMP_COLOR, label='OpenMP static'),
-        mpatches.Patch(color=MPI_COLOR, label='MPI'),
+        mpatches.Patch(color=_C['serial'],   label='Serial'),
+        mpatches.Patch(color=_C['static'],   label='OMP static'),
+        mpatches.Patch(color=_C['dynamic'],  label='OMP dynamic'),
+        mpatches.Patch(color=_C['collapse'], label='OMP collapse'),
+        mpatches.Patch(color=_C['mpi'],      label='MPI'),
     ]
-    ax_bar.legend(handles=leg_patches, fontsize=8, loc='upper right')
+    ax_bar.legend(handles=leg_patches, fontsize=7.5, loc='upper right', ncol=2)
 
     # ── (f) Summary Text ─────────────────────────────────────────────────────
     ax_sum.set_title('(f) Analysis Summary', fontsize=11, fontweight='bold')
@@ -604,54 +780,43 @@ def plot_full_report(serial_grid, omp_grid, mpi_grid,
         '  EE7218/EC7207 — High Performance Computing',
         '  Group 10 | Traffic Density Simulation',
         '',
-        '  MPI Parallelization Strategy',
-        '  ──────────────────────────────────────────',
-        '  • Model    : 2-D traffic diffusion, 200×200 grid',
-        '  • Decomp   : 1-D row decomposition across processes',
-        '  • Halo     : Non-blocking exchange (MPI_Isend/Irecv)',
-        '  • Scatter  : MPI_Scatterv (initial data distribution)',
-        '  • Gather   : MPI_Gatherv  (collect final state)',
-        '  • Stats    : MPI_Reduce (global min/max/avg)',
-        '  • Timing   : MPI_Barrier + MPI_Wtime',
-        '',
-        '  Accuracy (Serial vs MPI)',
+        '  Accuracy (Serial = reference)',
         '  ──────────────────────────────────────────',
     ]
+    if rmse_omp is not None:
+        v = 'PASS' if rmse_omp < 0.5 else 'CHECK'
+        summary.append(f'  Serial vs OMP : RMSE={rmse_omp:.6f}  [{v}]')
     if rmse_mpi is not None:
-        verdict = 'PASS' if rmse_mpi < 0.5 else 'CHECK seeds'
-        summary += [
-            f'  RMSE         : {rmse_mpi:.6f}',
-            f'  Verdict      : {verdict}',
-        ]
-    else:
-        summary += ['  RMSE: N/A (run simulation first)']
-
+        v = 'PASS' if rmse_mpi < 0.5 else 'CHECK'
+        summary.append(f'  Serial vs MPI : RMSE={rmse_mpi:.6f}  [{v}]')
     summary += [
         '',
-        '  Performance — MPI',
+        '  Best times (vs serial baseline)',
         '  ──────────────────────────────────────────',
     ]
-    for r in mpi_records:
+    if serial_time:
+        summary.append(f'  Serial        : {serial_time:.6f} s  (1.0000×)')
+    for sched in sorted(omp_perf.keys()):
+        best_o = min(omp_perf[sched], key=lambda d: d[1])
+        sp = serial_time / best_o[1] if serial_time else best_o[2]
         summary.append(
-            f'  {r["np"]}P: {r["time"]:.4f}s  |  '
-            f'Speedup={r["speedup"]:.4f}×  |  Eff={r["efficiency"]:.4f}')
-
+            f'  OMP {sched:<9}: {best_o[1]:.6f} s  '
+            f'({sp:.4f}×)  [{best_o[0]}T]')
     if serial_time and best_mpi:
         sp = serial_time / best_mpi['time']
-        summary += [
-            '',
-            f'  Serial time   : {serial_time:.6f} s',
-            f'  MPI best time : {best_mpi["time"]:.6f} s  (np={best_mpi["np"]})',
-            f'  Serial→MPI sp : {sp:.4f} ×',
-        ]
-
-    if 'static' in omp_perf and omp_perf['static']:
-        best_omp = min(omp_perf['static'], key=lambda d: d[1])
-        summary += [
-            '',
-            '  Best OpenMP (static) for reference:',
-            f'  {best_omp[0]}T: {best_omp[1]:.4f}s  Speedup={best_omp[2]:.4f}×',
-        ]
+        summary.append(
+            f'  MPI           : {best_mpi["time"]:.6f} s  '
+            f'({sp:.4f}×)  [{best_mpi["np"]}P]')
+    summary += [
+        '',
+        '  MPI design notes:',
+        '  ──────────────────────────────────────────',
+        '  • 1-D row decomposition across processes',
+        '  • Non-blocking halo exchange (MPI_Isend/Irecv)',
+        '  • MPI_Scatterv / MPI_Gatherv for data I/O',
+        '  • MPI_Reduce (global min / max / avg)',
+        '  • MPI_Barrier + MPI_Wtime for timing',
+    ]
 
     ax_sum.text(0.02, 0.98, '\n'.join(summary),
                 transform=ax_sum.transAxes,
@@ -720,6 +885,10 @@ def main():
         rmse_omp, rmse_mpi,
         outfile=os.path.join(out, 'mpi_heatmap_comparison.png'))
 
+    plot_3way_comparison(
+        mpi_records, omp_perf, serial_time,
+        outfile=os.path.join(out, 'mpi_3way_comparison.png'))
+
     plot_performance(
         mpi_records, serial_time, omp_perf,
         outfile=os.path.join(out, 'mpi_performance_analysis.png'))
@@ -733,6 +902,7 @@ def main():
     # ── Output file status ────────────────────────────────────────────────────
     print('\n[Output Files]')
     for fname in ['mpi_heatmap_comparison.png',
+                  'mpi_3way_comparison.png',
                   'mpi_performance_analysis.png',
                   'mpi_full_report.png']:
         path = os.path.join(out, fname)

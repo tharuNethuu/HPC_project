@@ -75,25 +75,28 @@ for np in ${NP_LIST}; do
 done
 
 # ---- Append speedup/efficiency footer (computed from logged times) ----
-# Read the timing lines from the performance file
-echo "" >> "${PERF_FILE}"
-echo "  Speedup and Efficiency (relative to np=1):" >> "${PERF_FILE}"
-echo "" >> "${PERF_FILE}"
-echo "  Procs    Speedup    Efficiency" >> "${PERF_FILE}"
-echo "  --------------------------------" >> "${PERF_FILE}"
+# Read data rows from the performance file into an array BEFORE appending,
+# to avoid the read-and-write-to-same-file infinite loop.
+mapfile -t PERF_LINES < "${PERF_FILE}"
 
-# Parse timing column (column 2) from data rows (lines starting with spaces + digit)
+{
+    echo ""
+    echo "  Speedup and Efficiency (relative to np=1):"
+    echo ""
+    echo "  Procs    Speedup    Efficiency"
+    echo "  --------------------------------"
+} >> "${PERF_FILE}"
+
 BASE_TIME=""
-while IFS= read -r line; do
-    # Match lines like "  1        0.050000  ..."
+for line in "${PERF_LINES[@]}"; do
+    # Match data rows like "  1        0.019810  ..."
     if [[ "$line" =~ ^[[:space:]]+([0-9]+)[[:space:]]+([0-9]+\.[0-9]+) ]]; then
-        np="${BASH_REMATCH[1]}"
+        np_val="${BASH_REMATCH[1]}"
         t="${BASH_REMATCH[2]}"
         if [[ -z "$BASE_TIME" ]]; then
             BASE_TIME="$t"
         fi
-        # Use awk for floating point arithmetic
-        awk -v np="$np" -v t="$t" -v base="$BASE_TIME" \
+        awk -v np="$np_val" -v t="$t" -v base="$BASE_TIME" \
             'BEGIN {
                 speedup    = base / t;
                 efficiency = speedup / np;
@@ -101,7 +104,7 @@ while IFS= read -r line; do
                        np, speedup, efficiency, efficiency*100;
             }' >> "${PERF_FILE}"
     fi
-done < "${PERF_FILE}"
+done
 
 # ---- Display final performance file ----
 echo "==================================================="
