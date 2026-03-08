@@ -1,82 +1,33 @@
-/*
-=========================================================
- FILE: traffic_openmp.c
- GROUP: 10
-
- DESCRIPTION:
-   OpenMP Parallel Traffic Density Simulation
-
-   Based on the serial baseline (traffic_serial.c).
-   Parallelizes the 2D multi-lane traffic diffusion model
-   using OpenMP shared-memory constructs.
-
- OpenMP Features Demonstrated:
-   1. omp parallel + master directive  (environment info)
-   2. omp parallel for schedule(static)   (update_static)
-   3. omp parallel for schedule(dynamic)  (update_dynamic)
-   4. omp parallel for collapse(2)        (update_collapse)
-   5. omp reduction (+, min, max)         (compute_stats)
-   6. omp_set_num_threads / omp_get_num_threads
-   7. omp_get_num_procs / omp_get_max_threads
-   8. omp_get_wtime  (timing / speedup measurement)
-
- Outputs:
-   openmp_output.txt          : Final traffic density matrices
-   openmp_traffic_heatmap.ppm : Heatmap image (Red=dense, Blue=sparse)
-   openmp_traffic_values.txt  : Lane-averaged values for visualization
-   openmp_performance.txt     : Scalability analysis (all thread counts)
-
- Compile:
-   gcc -fopenmp -O2 -o traffic_openmp traffic_openmp.c -lm
-
- Run:
-   ./traffic_openmp
-   OMP_NUM_THREADS=4 ./traffic_openmp
-=========================================================
-*/
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
 #include <string.h>
 #include <omp.h>
 
-/* ---- Simulation Parameters (match serial baseline) ---- */
 #define ROWS        200
 #define COLS        200
 #define LANES       3
 #define TIME_STEPS  200
-#define CHUNK       10          /* Dynamic schedule chunk size */
+#define CHUNK       10
 
-/* ---- Output File Names ---- */
+
 #define OUTPUT_FILE  "openmp_output.txt"
 #define IMAGE_FILE   "openmp_traffic_heatmap.ppm"
 #define PERF_FILE    "openmp_performance.txt"
 #define VALUES_FILE  "openmp_traffic_values.txt"
 
-/* ---- Thread Configurations for Scalability Test ---- */
 #define NUM_CONFIGS  4
 static int thread_counts[NUM_CONFIGS] = {1, 2, 4, 8};
 
-/* ---- Global Shared Arrays (shared between all threads) ---- */
 double traffic[ROWS][COLS][LANES];
 double new_traffic[ROWS][COLS][LANES];
 double weather[ROWS][COLS];
-double ref_traffic[ROWS][COLS][LANES];   /* 1-thread reference for accuracy check */
+double ref_traffic[ROWS][COLS][LANES];
 
-
-/* ============================================================
- * initialize()
- * Serial initialization with fixed seed.
- * rand() is NOT thread-safe; kept serial for reproducibility.
- * Matches the serial baseline logic exactly.
- * ============================================================ */
 void initialize() {
-    srand(1);   /* Seed=1 matches serial baseline (C default: no srand = srand(1)) */
+    srand(1);
     for (int i = 0; i < ROWS; i++) {
         for (int j = 0; j < COLS; j++) {
-
-            /* Weather modifier (normal = 1.0) */
             weather[i][j] = 1.0;
 
             /* Rain region in center: 0.7 = 30% traffic speed reduction */
@@ -90,20 +41,7 @@ void initialize() {
     }
 }
 
-
-/* ============================================================
- * update_static()
- * Parallel update using STATIC schedule.
- * Rows are divided evenly across threads.
- * Each thread computes a contiguous block of rows.
- *
- * OpenMP construct: #pragma omp parallel for schedule(static)
- * Data scoping:
- *   - traffic, new_traffic, weather: shared (global arrays)
- *   - i, j, l, current, neighbors, updated: private (loop vars / local decls)
- * ============================================================ */
 void update_static() {
-    /* Phase 1: Compute new traffic densities (read traffic, write new_traffic) */
     #pragma omp parallel for schedule(static)
     for (int i = 1; i < ROWS-1; i++) {
         for (int j = 1; j < COLS-1; j++) {
@@ -116,9 +54,6 @@ void update_static() {
             }
         }
     }
-    /* Implicit barrier at end of parallel for ensures all writes complete */
-
-    /* Phase 2: Copy new_traffic back to traffic */
     #pragma omp parallel for schedule(static)
     for (int i = 1; i < ROWS-1; i++)
         for (int j = 1; j < COLS-1; j++)
@@ -126,17 +61,7 @@ void update_static() {
                 traffic[i][j][l] = new_traffic[i][j][l];
 }
 
-
-/* ============================================================
- * update_dynamic()
- * Parallel update using DYNAMIC schedule (chunk = CHUNK).
- * Threads request new chunks as they finish; better load
- * balancing for irregular workloads.
- *
- * OpenMP construct: #pragma omp parallel for schedule(dynamic, CHUNK)
- * ============================================================ */
 void update_dynamic() {
-    /* Phase 1: Compute (dynamic row assignment per thread) */
     #pragma omp parallel for schedule(dynamic, CHUNK)
     for (int i = 1; i < ROWS-1; i++) {
         for (int j = 1; j < COLS-1; j++) {
@@ -149,8 +74,6 @@ void update_dynamic() {
             }
         }
     }
-
-    /* Phase 2: Copy back */
     #pragma omp parallel for schedule(static)
     for (int i = 1; i < ROWS-1; i++)
         for (int j = 1; j < COLS-1; j++)
@@ -158,19 +81,7 @@ void update_dynamic() {
                 traffic[i][j][l] = new_traffic[i][j][l];
 }
 
-
-/* ============================================================
- * update_collapse()
- * Parallel update using collapse(2) with STATIC schedule.
- * The (i,j) nested loops are collapsed into one iteration
- * space of size (ROWS-2)*(COLS-2) = 39204 iterations,
- * then distributed across threads.
- * Provides finer-grained distribution; useful when ROWS is small.
- *
- * OpenMP construct: #pragma omp parallel for schedule(static) collapse(2)
- * ============================================================ */
 void update_collapse() {
-    /* Phase 1: Compute (collapsed (i,j) assignment per thread) */
     #pragma omp parallel for schedule(static) collapse(2)
     for (int i = 1; i < ROWS-1; i++) {
         for (int j = 1; j < COLS-1; j++) {
@@ -183,8 +94,6 @@ void update_collapse() {
             }
         }
     }
-
-    /* Phase 2: Copy back (also collapsed) */
     #pragma omp parallel for schedule(static) collapse(2)
     for (int i = 1; i < ROWS-1; i++)
         for (int j = 1; j < COLS-1; j++)
@@ -192,18 +101,6 @@ void update_collapse() {
                 traffic[i][j][l] = new_traffic[i][j][l];
 }
 
-
-/* ============================================================
- * compute_stats()
- * Computes min, max and average traffic density across all
- * cells and lanes using OpenMP reduction clauses.
- *
- * OpenMP construct: #pragma omp parallel for reduction(+:sum)
- *                                          reduction(min:lo)
- *                                          reduction(max:hi)
- * Each thread accumulates a private copy; results are merged
- * automatically at the implicit barrier.
- * ============================================================ */
 void compute_stats(double *out_min, double *out_max, double *out_avg) {
     double sum = 0.0;
     double lo  = 1e18;
@@ -227,14 +124,6 @@ void compute_stats(double *out_min, double *out_max, double *out_avg) {
     *out_avg = sum / (double)(ROWS * COLS * LANES);
 }
 
-
-/* ============================================================
- * accuracy_check()
- * Returns the maximum absolute difference between the current
- * traffic state and the 1-thread reference state (ref_traffic).
- * Used to verify that parallel results match serial results.
- * Expected result: 0.000000e+00 (deterministic computation).
- * ============================================================ */
 double accuracy_check() {
     double max_diff = 0.0;
     for (int i = 0; i < ROWS; i++)
@@ -246,12 +135,6 @@ double accuracy_check() {
     return max_diff;
 }
 
-
-/* ============================================================
- * save_output()
- * Saves final traffic density matrices (all lanes) plus
- * performance summary to text file.
- * ============================================================ */
 void save_output(double exec_time, int num_threads, const char *sched,
                  double speedup, double efficiency) {
     FILE *fp = fopen(OUTPUT_FILE, "w");
@@ -283,13 +166,6 @@ void save_output(double exec_time, int num_threads, const char *sched,
     fclose(fp);
 }
 
-
-/* ============================================================
- * save_image()
- * Saves traffic heatmap as PPM image.
- * Color mapping: Red = high density, Blue = low density.
- * Format matches serial baseline output (traffic_heatmap.ppm).
- * ============================================================ */
 void save_image(const char *filename) {
     FILE *img = fopen(filename, "w");
     if (!img) { fprintf(stderr, "ERROR: Cannot open %s\n", filename); return; }
@@ -301,11 +177,9 @@ void save_image(const char *filename) {
             for (int l = 0; l < LANES; l++)
                 sum += traffic[i][j][l];
             double avg = sum / LANES;
-            /* Normalize 0-100 range to 0-255 */
             int intensity = (int)(255.0 * avg / 100.0);
             if (intensity > 255) intensity = 255;
             if (intensity < 0)   intensity = 0;
-            /* Red = high traffic, Blue = low traffic */
             fprintf(img, "%d %d %d ", intensity, 0, 255 - intensity);
         }
         fprintf(img, "\n");
@@ -313,12 +187,6 @@ void save_image(const char *filename) {
     fclose(img);
 }
 
-
-/* ============================================================
- * save_raw_values()
- * Saves lane-averaged traffic values for external visualization.
- * Same format as serial baseline traffic_values.txt.
- * ============================================================ */
 void save_raw_values(const char *filename) {
     FILE *fp = fopen(filename, "w");
     if (!fp) { fprintf(stderr, "ERROR: Cannot open %s\n", filename); return; }
@@ -336,19 +204,6 @@ void save_raw_values(const char *filename) {
     fclose(fp);
 }
 
-
-/* ============================================================
- * run_scalability_test()
- * Runs the simulation for all thread configurations using the
- * provided update function. Records timing, speedup, efficiency
- * and accuracy at each configuration.
- *
- * Parameters:
- *   perf_fp      - open file handle for performance log
- *   update_fn    - pointer to update function (static/dynamic/collapse)
- *   sched_name   - label string for this schedule
- *   base_time_out- returns the 1-thread execution time (for caller use)
- * ============================================================ */
 void run_scalability_test(FILE *perf_fp,
                           void (*update_fn)(void),
                           const char *sched_name,
@@ -366,7 +221,7 @@ void run_scalability_test(FILE *perf_fp,
         int nt = thread_counts[tc];
         omp_set_num_threads(nt);
 
-        initialize();   /* Reset to identical initial state each run */
+        initialize();
 
         start = omp_get_wtime();
         for (int t = 0; t < TIME_STEPS; t++)
@@ -376,13 +231,11 @@ void run_scalability_test(FILE *perf_fp,
 
         if (tc == 0) {
             base_time = exec_time;
-            /* Save 1-thread final state as accuracy reference */
             memcpy(ref_traffic, traffic, sizeof(traffic));
         }
 
         double speedup    = base_time / exec_time;
         double efficiency = speedup / (double)nt;
-        /* Accuracy: max absolute diff vs 1-thread result (expect ~0.0) */
         double max_diff   = (tc > 0) ? accuracy_check() : 0.0;
 
         compute_stats(&min_d, &max_d, &avg_d);
@@ -398,10 +251,6 @@ void run_scalability_test(FILE *perf_fp,
     *base_time_out = base_time;
 }
 
-
-/* ============================================================
- * main()
- * ============================================================ */
 int main() {
     double start, end, exec_time;
     double min_d, max_d, avg_d;
@@ -410,10 +259,7 @@ int main() {
     printf("  OpenMP Parallel Traffic Density Simulation - Group 10\n");
     printf("==========================================================\n");
 
-    /* Disable dynamic thread adjustment for predictable thread counts */
     omp_set_dynamic(0);
-
-    /* ------ Display OpenMP Environment Info (master thread only) ------ */
     #pragma omp parallel
     {
         #pragma omp master
@@ -438,7 +284,6 @@ int main() {
     for (int i = 0; i < NUM_CONFIGS; i++)
         printf("%d%s", thread_counts[i], i < NUM_CONFIGS - 1 ? ", " : "\n");
 
-    /* ------ Open Performance Log ------ */
     FILE *perf_fp = fopen(PERF_FILE, "w");
     if (!perf_fp) { fprintf(stderr, "ERROR: Cannot open %s\n", PERF_FILE); return 1; }
 
@@ -453,9 +298,6 @@ int main() {
             "Efficiency", "Min", "Max", "Avg", "MaxDiff(vs1T)");
     fprintf(perf_fp, "  ------------------------------------------------------------------------------------\n");
 
-    /* ================================================================
-     * SCALABILITY TESTS: static, dynamic, collapse schedules
-     * ================================================================ */
     printf("\n[Scalability Analysis]\n");
     printf("  Grid: %dx%d | Lanes: %d | Time Steps: %d\n",
            ROWS, COLS, LANES, TIME_STEPS);
@@ -473,9 +315,6 @@ int main() {
     fprintf(perf_fp, "               Expected: 0.00e+00 (deterministic computation)\n");
     fclose(perf_fp);
 
-    /* ================================================================
-     * FINAL OUTPUT: max thread count, static schedule
-     * ================================================================ */
     int best_threads = thread_counts[NUM_CONFIGS - 1];
     omp_set_num_threads(best_threads);
     initialize();
@@ -503,9 +342,6 @@ int main() {
 
     printf("  %-42s -> Scalability log (all thread configs)\n", PERF_FILE);
 
-    /* ================================================================
-     * FINAL SUMMARY
-     * ================================================================ */
     printf("\n[Final Summary : %d threads, static schedule]\n", best_threads);
     printf("  Execution Time : %.6f seconds\n",      exec_time);
     printf("  Speedup        : %.4f x\n",             final_speedup);
