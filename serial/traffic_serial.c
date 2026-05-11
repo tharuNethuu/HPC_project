@@ -35,13 +35,17 @@ void initialize() {
     for(int i = 0; i < ROWS; i++) {
         for(int j = 0; j < COLS; j++) {
 
-            // Weather modifier (normal = 1.0)
+            // Weather modifier: 1.0=normal, 0.8=rain, 0.5=accident
             weather[i][j] = 1.0;
 
-            // Create rain region in center
-            if(i > ROWS/3 && i < 2*ROWS/3 &&
-               j > COLS/3 && j < 2*COLS/3)
-                weather[i][j] = 0.7;
+            // Rain zone: center third of grid
+            if (i > ROWS/3 && i < 2*ROWS/3 &&
+                j > COLS/3 && j < 2*COLS/3)
+                weather[i][j] = 0.8;
+
+            // Accident zone: bottom-right corner
+            if (i > 3*ROWS/4 && j > 3*COLS/4)
+                weather[i][j] = 0.5;
 
             for(int l = 0; l < LANES; l++) {
                 // Random initial density (0–100)

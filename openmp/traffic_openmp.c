@@ -30,10 +30,14 @@ void initialize() {
         for (int j = 0; j < COLS; j++) {
             weather[i][j] = 1.0;
 
-            /* Rain region in center: 0.7 = 30% traffic speed reduction */
+            /* Rain zone in center: 0.8 = 20% density reduction */
             if (i > ROWS/3 && i < 2*ROWS/3 &&
                 j > COLS/3 && j < 2*COLS/3)
-                weather[i][j] = 0.7;
+                weather[i][j] = 0.8;
+
+            /* Accident zone in bottom-right corner: 0.5 = 50% density reduction */
+            if (i > 3*ROWS/4 && j > 3*COLS/4)
+                weather[i][j] = 0.5;
 
             for (int l = 0; l < LANES; l++)
                 traffic[i][j][l] = (double)(rand() % 100);
