@@ -165,6 +165,8 @@ function clampValue(value, minimum, maximum, fallback) {
 }
 
 function bindLimitedNumberInput(inputElement, minimum, maximum, fallback, commit) {
+  let lastCommittedValue = clampValue(inputElement.value, minimum, maximum, fallback);
+
   const normalize = () => {
     const nextValue = clampValue(inputElement.value, minimum, maximum, fallback);
     inputElement.value = String(nextValue);
@@ -172,17 +174,27 @@ function bindLimitedNumberInput(inputElement, minimum, maximum, fallback, commit
   };
 
   inputElement.addEventListener('input', () => {
-    normalize();
+    const nextValue = normalize();
+    if (nextValue !== lastCommittedValue) {
+      lastCommittedValue = nextValue;
+      commit(nextValue);
+    }
   });
 
   inputElement.addEventListener('change', () => {
     const nextValue = normalize();
-    commit(nextValue);
+    if (nextValue !== lastCommittedValue) {
+      lastCommittedValue = nextValue;
+      commit(nextValue);
+    }
   });
 
   inputElement.addEventListener('blur', () => {
     const nextValue = normalize();
-    commit(nextValue);
+    if (nextValue !== lastCommittedValue) {
+      lastCommittedValue = nextValue;
+      commit(nextValue);
+    }
   });
 }
 
@@ -362,6 +374,7 @@ function configuredPreviewSnapshot(mode, conf) {
   }
   const snapshot = cloneSnapshot(state.staticData[mode]);
   const summary = snapshot.summary || {};
+  const host = state.bootstrap ? state.bootstrap.host : 'local';
 
   if (mode === 'openmp') {
     const schedule = conf.schedule || 'static';
@@ -378,6 +391,21 @@ function configuredPreviewSnapshot(mode, conf) {
       summary.bestSpeedup = Number(speedPoint.y);
       summary.bestEfficiency = Number(speedPoint.y) / Number(timePoint.x);
     }
+    const compileCmd = host === 'macos'
+      ? 'clang -O2 -Xpreprocessor -fopenmp -o traffic_openmp traffic_openmp.c -lm -lomp'
+      : 'gcc -O2 -fopenmp -o traffic_openmp traffic_openmp.c -lm';
+    let log = `[Preview — static snapshot data]\n\n$ ${compileCmd}\n$ ./traffic_openmp ${threads} ${schedule}`;
+    if (timePoint) {
+      log += `\n\nSelected config: ${threads} threads / ${schedule} schedule`;
+      log += `\n  Execution time : ${Number(timePoint.y).toFixed(4)} s`;
+      if (speedPoint) {
+        log += `\n  Speedup        : ${Number(speedPoint.y).toFixed(4)}x`;
+        log += `\n  Efficiency     : ${(Number(speedPoint.y) / threads * 100).toFixed(2)}%`;
+      }
+    } else {
+      log += `\n\nNo recorded data for ${threads} threads / ${schedule}.`;
+    }
+    snapshot.log = log;
   } else if (mode === 'mpi') {
     const np = Number(conf.processes || 4);
     const timeSeries = snapshot.charts?.[0]?.series?.[0];
@@ -392,6 +420,18 @@ function configuredPreviewSnapshot(mode, conf) {
       summary.bestSpeedup = Number(speedPoint.y);
       summary.bestEfficiency = Number(speedPoint.y) / Number(timePoint.x);
     }
+    let log = `[Preview — static snapshot data]\n\n$ mpicc -O2 -o traffic_mpi traffic_mpi.c -lm\n$ mpirun --oversubscribe -np ${np} ./traffic_mpi`;
+    if (timePoint) {
+      log += `\n\nSelected config: ${np} MPI processes`;
+      log += `\n  Execution time : ${Number(timePoint.y).toFixed(4)} s`;
+      if (speedPoint) {
+        log += `\n  Speedup        : ${Number(speedPoint.y).toFixed(4)}x`;
+        log += `\n  Efficiency     : ${(Number(speedPoint.y) / np * 100).toFixed(2)}%`;
+      }
+    } else {
+      log += `\n\nNo recorded data for ${np} processes.`;
+    }
+    snapshot.log = log;
   } else if (mode === 'hybrid') {
     const np = Number(conf.processes || 2);
     const nt = Number(conf.threads || 4);
@@ -409,6 +449,21 @@ function configuredPreviewSnapshot(mode, conf) {
       summary.bestSpeedup = Number(speedPoint.y);
       summary.bestEfficiency = Number(speedPoint.y) / Number(timePoint.x);
     }
+    const compileCmd = host === 'macos'
+      ? 'mpicc -O2 -Xpreprocessor -fopenmp -o traffic_hybrid traffic_hybrid.c -lm -lomp'
+      : 'mpicc -O2 -fopenmp -o traffic_hybrid traffic_hybrid.c -lm';
+    let log = `[Preview — static snapshot data]\n\n$ ${compileCmd}\n$ mpirun --oversubscribe -np ${np} ./traffic_hybrid ${nt}`;
+    if (timePoint) {
+      log += `\n\nSelected config: ${np} MPI processes x ${nt} threads (${targetTotal} total workers)`;
+      log += `\n  Execution time : ${Number(timePoint.y).toFixed(4)} s`;
+      if (speedPoint) {
+        log += `\n  Speedup        : ${Number(speedPoint.y).toFixed(4)}x`;
+        log += `\n  Efficiency     : ${(Number(speedPoint.y) / targetTotal * 100).toFixed(2)}%`;
+      }
+    } else {
+      log += `\n\nNo recorded data for ${np}P x ${nt}T.`;
+    }
+    snapshot.log = log;
   }
 
   snapshot.summary = summary;
@@ -423,7 +478,6 @@ function renderPreviewForCurrentSelection() {
   }
   renderResult(snapshot);
   $('statusChip').textContent = 'Preview data';
-  $('outputLog').textContent = 'Showing static preview from checked-in output files. Start ui/server.py and open http://127.0.0.1:8000 for live run/compile actions.';
 }
 
 function formatCommandSteps(result) {
@@ -735,17 +789,25 @@ async function runSelectedBenchmark() {
       renderPreviewForCurrentSelection();
     } else {
       $('statusChip').textContent = 'File mode';
-      $('outputLog').textContent = 'Open ui/server.py and visit http://127.0.0.1:8000 to enable running benchmarks from the dashboard.';
     }
     return;
   }
   setRunning(true);
-  $('outputLog').textContent = `Running ${state.selectedMode}...`;
+  const conf = currentModeConfig();
+  let runLabel = state.selectedMode;
+  if (state.selectedMode === 'openmp') {
+    runLabel = `OpenMP with ${conf.threads || 4} threads`;
+  } else if (state.selectedMode === 'mpi') {
+    runLabel = `MPI with ${conf.processes || 4} processes`;
+  } else if (state.selectedMode === 'hybrid') {
+    runLabel = `Hybrid with ${conf.processes || 2} processes and ${conf.threads || 4} threads`;
+  }
+  $('outputLog').textContent = `Running ${runLabel}...`;
   try {
     const response = await fetch('/api/run', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ mode: state.selectedMode, config: currentModeConfig() }),
+      body: JSON.stringify({ mode: state.selectedMode, config: conf }),
     });
     const payload = await response.json();
     if (!response.ok || !payload.ok) {
@@ -777,7 +839,6 @@ async function init() {
   updateCommandPreview();
   if (window.location.protocol === 'file:') {
     $('statusChip').textContent = 'Preview only';
-    $('outputLog').textContent = 'This page is opened as a file. Static preview data is enabled per mode. Launch ui/server.py for benchmark execution and live output parsing.';
   }
   $('runButton').addEventListener('click', runSelectedBenchmark);
   $('autoRunToggle').addEventListener('change', () => {

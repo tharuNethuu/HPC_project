@@ -238,14 +238,6 @@ select {
   margin-top: 14px;
 }
 
-.hero-actions {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 12px;
-  min-width: 240px;
-}
-
 .primary-button {
   border: 0;
   border-radius: 16px;
@@ -288,29 +280,32 @@ select {
 }
 
 .runtime-controls-wrap {
+  flex: 1 1 340px;
+}
+
+.compact-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 18px;
   margin-bottom: 16px;
 }
 
-.runtime-guide {
-  margin-bottom: 14px;
-  padding: 12px 14px;
-  border: 1px solid rgba(15, 23, 42, 0.08);
-  border-radius: 14px;
-  background: rgba(255, 255, 255, 0.7);
+.compact-head h2 {
+  margin-top: 4px;
+  font-size: 1.35rem;
 }
 
-.runtime-guide ul {
-  margin: 0;
-  padding-left: 18px;
-  color: var(--muted);
+.run-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
 }
 
-.runtime-guide li {
-  margin: 4px 0;
-}
-
-.runtime-guide strong {
-  color: var(--text);
+.run-row .primary-button {
+  min-width: 190px;
 }
 
 .runtime-controls {
@@ -494,11 +489,13 @@ select {
 @media (max-width: 920px) {
   .hero-card,
   .control-row,
-  .panel-head {
+  .panel-head,
+  .compact-head,
+  .run-row {
     flex-direction: column;
   }
 
-  .hero-actions {
+  .toggle {
     width: 100%;
     align-items: flex-start;
   }
