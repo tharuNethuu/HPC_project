@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Traffic Lab Control</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <div class="background-orb orb-a"></div>
+  <div class="background-orb orb-b"></div>
+
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">TL</div>
+        <div>
+          <div class="brand-title">Traffic Lab Control</div>
+          <div class="brand-subtitle">Benchmark runner and analysis dashboard</div>
+        </div>
+      </div>
+
+      <div class="sidebar-block">
+        <div class="section-label">Benchmark mode</div>
+        <div id="modeList" class="mode-list"></div>
+      </div>
+
+      <div class="sidebar-block platform-card">
+        <div class="section-label">Detected host</div>
+        <div id="platformBadge" class="platform-badge"></div>
+        <p id="platformHint" class="platform-hint"></p>
+      </div>
+
+      <div class="sidebar-block sidebar-note">
+        <div class="section-label">How it works</div>
+        <p>The selected benchmark compiles if needed, runs in its own folder, then the dashboard parses the latest output files and redraws the charts.</p>
+      </div>
+    </aside>
+
+    <main class="main">
+      <section class="hero-card panel">
+        <div>
+          <p class="eyebrow">Interactive HPC dashboard</p>
+          <h1>Run serial, OpenMP, MPI, or hybrid and inspect the results instantly.</h1>
+          <p class="hero-copy">This dashboard is designed for macOS and WSL/Linux workflows. Select a target and it will execute the right command path for the host environment, then render a heatmap and performance curves from the latest outputs.</p>
+        </div>
+        <div class="hero-actions">
+          <button id="runButton" class="primary-button">Run selected benchmark</button>
+          <label class="toggle">
+            <input id="autoRunToggle" type="checkbox" checked>
+            <span>Run automatically on selection</span>
+          </label>
+        </div>
+      </section>
+
+      <section class="panel control-panel">
+        <div class="runtime-guide">
+          <div class="section-label">Mode guide</div>
+          <ul>
+            <li><strong>Serial:</strong> No runtime settings (single process, single thread)</li>
+            <li><strong>OpenMP:</strong> Set Threads and Schedule, then run</li>
+            <li><strong>MPI:</strong> Set MPI processes, then run</li>
+            <li><strong>Hybrid:</strong> Set MPI processes and OMP threads per process, then run</li>
+          </ul>
+        </div>
+        <div class="runtime-controls-wrap">
+          <div class="section-label">Runtime settings</div>
+          <div id="runtimeControls" class="runtime-controls"></div>
+        </div>
+        <div class="control-row">
+          <div>
+            <div class="section-label">Command preview</div>
+            <pre id="commandPreview" class="command-preview">Select a benchmark to see the command sequence.</pre>
+          </div>
+          <div class="status-chip" id="statusChip">Idle</div>
+        </div>
+      </section>
+
+      <section id="metricsGrid" class="metrics-grid"></section>
+
+      <section class="visual-grid">
+        <div class="panel visual-panel">
+          <div class="panel-head">
+            <div>
+              <div class="section-label">Heatmap</div>
+              <h2 id="heatmapTitle">Traffic density</h2>
+            </div>
+            <div id="heatmapMeta" class="panel-meta"></div>
+          </div>
+          <canvas id="heatmapCanvas" class="heatmap-canvas"></canvas>
+        </div>
+
+        <div class="panel visual-panel">
+          <div class="panel-head">
+            <div>
+              <div class="section-label">Charts</div>
+              <h2 id="chartsTitle">Performance curves</h2>
+            </div>
+            <div class="panel-meta">Rendered from the latest output files</div>
+          </div>
+          <div id="chartsContainer" class="charts-container"></div>
+        </div>
+      </section>
+
+      <section class="panel output-panel">
+        <div class="panel-head">
+          <div>
+            <div class="section-label">Run output</div>
+            <h2>Command log and report excerpt</h2>
+          </div>
+          <div class="panel-meta">The most recent run is shown below</div>
+        </div>
+        <pre id="outputLog" class="output-log">Choose a benchmark to begin.</pre>
+      </section>
+    </main>
+  </div>
+
+  <script src="./data.js?v=20260523a"></script>
+  <script src="./app.js?v=20260523a"></script>
+</body>
+</html>
