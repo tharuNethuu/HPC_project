@@ -478,9 +478,10 @@ def build_compile_candidates(mode: str, host: str) -> List[List[str]]:
                     base.extend([f"-I{libomp_prefix}/include", f"-L{libomp_prefix}/lib"])
                 base.extend(["-o", "traffic_openmp", "traffic_openmp.c", "-lm", "-lomp"])
                 candidates.append(base)
-            gcc = which("gcc")
-            if gcc:
-                candidates.append([gcc, "-O2", "-fopenmp", "-o", "traffic_openmp", "traffic_openmp.c", "-lm"])
+            for gcc_name in ("gcc-14", "gcc-13", "gcc-12", "gcc-11"):
+                gcc = which(gcc_name)
+                if gcc:
+                    candidates.append([gcc, "-O2", "-fopenmp", "-o", "traffic_openmp", "traffic_openmp.c", "-lm"])
         else:
             gcc = which("gcc")
             if gcc:
