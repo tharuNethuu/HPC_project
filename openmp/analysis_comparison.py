@@ -33,8 +33,8 @@ from matplotlib.colors import LinearSegmentedColormap
 
 # ── File paths (relative to this script's location) ──────────────────────────
 SCRIPT_DIR   = os.path.dirname(os.path.abspath(__file__))
-SERIAL_OUTPUT  = os.path.join(SCRIPT_DIR, '..', 'serial_output.txt')
-SERIAL_VALUES  = os.path.join(SCRIPT_DIR, '..', 'traffic_values.txt')
+SERIAL_OUTPUT  = os.path.join(SCRIPT_DIR, '..', 'serial', 'serial_output.txt')
+SERIAL_VALUES  = os.path.join(SCRIPT_DIR, '..', 'serial', 'traffic_values.txt')
 OMP_PERF       = os.path.join(SCRIPT_DIR, 'openmp_performance.txt')
 OMP_VALUES     = os.path.join(SCRIPT_DIR, 'openmp_traffic_values.txt')
 OMP_OUTPUT     = os.path.join(SCRIPT_DIR, 'openmp_output.txt')

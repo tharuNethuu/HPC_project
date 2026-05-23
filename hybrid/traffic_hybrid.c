@@ -1,49 +1,48 @@
 /*
 =========================================================
- FILE: traffic_mpi.c
+ FILE: traffic_hybrid.c
  GROUP: 10
 
  DESCRIPTION:
-   MPI Parallel Traffic Density Simulation
+   Hybrid MPI + OpenMP Traffic Density Simulation
 
-   Based on the serial baseline (traffic_serial.c).
-   Parallelizes the 2D multi-lane traffic diffusion model
-   using MPI distributed-memory message passing.
+   Combines distributed-memory (MPI) and shared-memory
+   (OpenMP) parallelism in a two-level hierarchy:
 
-   Strategy: 1-D row decomposition.
-   Each MPI process owns a contiguous block of rows.
-   Neighboring processes exchange boundary rows (halo
-   exchange) before every time step so the diffusion
-   stencil can be evaluated without gaps.
+     MPI level  : 1-D row decomposition — each MPI process
+                  owns a contiguous block of grid rows.
+                  Processes communicate via halo exchange.
 
- MPI Features Demonstrated:
-   1.  MPI_Init / MPI_Finalize           (setup / teardown)
-   2.  MPI_Comm_rank / MPI_Comm_size     (process identity)
-   3.  MPI_Scatterv                      (distribute grid rows to processes)
-   4.  MPI_Gatherv                       (collect final rows to rank 0)
-   5.  MPI_Isend / MPI_Irecv             (non-blocking halo exchange)
-   6.  MPI_Waitall                       (complete non-blocking ops)
-   7.  MPI_Reduce  (MPI_SUM/MIN/MAX)     (global statistics aggregation)
-   8.  MPI_Barrier                       (synchronisation for accurate timing)
-   9.  MPI_Wtime                         (high-resolution wall-clock timer)
+     OpenMP level: Within each MPI process, the per-row
+                  diffusion loop is parallelised across
+                  OMP threads sharing the process's memory.
 
- Grid decomposition:
-   Global grid : ROWS x COLS x LANES  (all rows in rank 0's global arrays)
-   Local slice : local_rows x COLS x LANES  (+2 ghost/halo rows at top & bottom)
-   Ghost rows  : filled by halo exchange each time step
+   Analogy (from slides):
+     Country
+       ├── Colombo Control Center  (MPI Process)
+       │     ├── Engineer 1        (OpenMP Thread)
+       │     └── Engineer 2        (OpenMP Thread)
+       └── Kandy Control Center    (MPI Process)
+             ├── Engineer 1        (OpenMP Thread)
+             └── Engineer 2        (OpenMP Thread)
 
- Outputs (written by rank 0):
-   mpi_output.txt          : Final traffic density matrices (all lanes)
-   mpi_traffic_heatmap.ppm : Heatmap image (Red=dense, Blue=sparse)
-   mpi_traffic_values.txt  : Lane-averaged values for external visualization
-   mpi_performance.txt     : Performance data row appended each run
-                             (run_scaling.sh writes header before first run)
+ MPI Features:
+   MPI_Init / MPI_Finalize, MPI_Comm_rank / MPI_Comm_size,
+   MPI_Scatterv, MPI_Gatherv, MPI_Isend / MPI_Irecv,
+   MPI_Waitall, MPI_Reduce, MPI_Barrier, MPI_Wtime
+
+ OpenMP Features:
+   #pragma omp parallel for  (parallelise row loop)
+   schedule(static)          (even work distribution)
+   reduction(+:), reduction(min:), reduction(max:)
+   omp_set_num_threads()     (runtime thread control)
 
  Compile:
-   mpicc -O2 -o traffic_mpi traffic_mpi.c -lm
+   mpicc -O2 -fopenmp -o traffic_hybrid traffic_hybrid.c -lm
 
  Run:
-   mpirun -np 4 ./traffic_mpi
+   mpirun -np 2 ./traffic_hybrid 4    (2 MPI x 4 OMP = 8 workers)
+   mpirun -np 4 ./traffic_hybrid 2    (4 MPI x 2 OMP = 8 workers)
 =========================================================
 */
 
@@ -52,22 +51,21 @@
 #include <math.h>
 #include <string.h>
 #include <mpi.h>
+#include <omp.h>
 
-/* ---- Simulation Parameters (match serial/OpenMP baselines) ---- */
+/* ── Simulation parameters (identical to serial / OMP / MPI baselines) ── */
 #define ROWS        200
 #define COLS        200
 #define LANES       3
 #define TIME_STEPS  200
 
-/* ---- Output File Names ---- */
-#define OUTPUT_FILE  "mpi_output.txt"
-#define IMAGE_FILE   "mpi_traffic_heatmap.ppm"
-#define PERF_FILE    "mpi_performance.txt"
-#define VALUES_FILE  "mpi_traffic_values.txt"
+/* ── Output files ── */
+#define OUTPUT_FILE  "hybrid_output.txt"
+#define IMAGE_FILE   "hybrid_traffic_heatmap.ppm"
+#define PERF_FILE    "hybrid_performance.txt"
+#define VALUES_FILE  "hybrid_traffic_values.txt"
 
-/* ---- Halo Exchange Message Tags ---- */
-/* TAG_NORTH : message carrying a row travelling northward (to lower rank)  */
-/* TAG_SOUTH : message carrying a row travelling southward (to higher rank) */
+/* ── Halo-exchange tags ── */
 #define TAG_NORTH  10
 #define TAG_SOUTH  11
 
@@ -76,40 +74,31 @@
  * ================================================================ */
 
 int rank, nprocs;
+int local_rows;   /* rows owned by this process                    */
+int row_start;    /* global row index of this process's first row  */
 
-/* Rows owned by this process and their global offset */
-int local_rows;
-int row_start;
-
-/* Local arrays: dimension [local_rows + 2][COLS][LANES]
- * Index 0            = top ghost row    (from rank-1)
- * Index 1..local_rows = owned data rows
- * Index local_rows+1  = bottom ghost row (from rank+1)       */
+/* Local arrays: [local_rows + 2][COLS][LANES]
+ * index 0              = top ghost row    (from rank-1)
+ * index 1..local_rows  = owned data rows
+ * index local_rows+1   = bottom ghost row (from rank+1) */
 double (*local_traffic)[COLS][LANES];
 double (*local_new)[COLS][LANES];
 double (*local_weather)[COLS];
 
-/* Full-grid arrays live on rank 0; used for init, gather, and output.
- * All processes allocate them (global/BSS) because MPI scatter/gather
- * signatures require valid pointers on all ranks; for non-root the
- * send/recv buffers of MPI_Scatterv/Gatherv are simply ignored.      */
+/* Full-grid arrays on rank 0 (scatter/gather source/destination) */
 double global_traffic[ROWS][COLS][LANES];
 double global_weather[ROWS][COLS];
 
 /* Per-process row distribution metadata */
-int *row_counts;   /* row_counts[p] = number of rows assigned to process p */
-int *row_displs;   /* row_displs[p] = global row index of process p's first row */
-
-/* MPI_Scatterv / MPI_Gatherv counts and displacements (in doubles) */
-int *tc, *td;      /* traffic : counts / displs */
-int *wc, *wd;      /* weather : counts / displs */
+int *row_counts, *row_displs;
+int *tc, *td;   /* traffic scatter/gather counts and displacements */
+int *wc, *wd;   /* weather  scatter/gather counts and displacements */
 
 
 /* ================================================================
  * compute_distribution()
- * Splits ROWS as evenly as possible across nprocs.
- * Remainder rows (ROWS % nprocs) are given one each to the
- * first (ROWS % nprocs) processes.
+ * Split ROWS evenly; remainder rows go to first (ROWS % nprocs)
+ * processes one each.
  * ================================================================ */
 void compute_distribution(void)
 {
@@ -127,13 +116,11 @@ void compute_distribution(void)
     for (int p = 0; p < nprocs; p++) {
         row_counts[p] = base + (p < rem ? 1 : 0);
         row_displs[p] = off;
-
-        tc[p] = row_counts[p] * COLS * LANES;   /* doubles for traffic */
+        tc[p] = row_counts[p] * COLS * LANES;
         td[p] = off * COLS * LANES;
-        wc[p] = row_counts[p] * COLS;            /* doubles for weather */
+        wc[p] = row_counts[p] * COLS;
         wd[p] = off * COLS;
-
-        off += row_counts[p];
+        off  += row_counts[p];
     }
 
     local_rows = row_counts[rank];
@@ -143,16 +130,13 @@ void compute_distribution(void)
 
 /* ================================================================
  * initialize_global()
- * Called on rank 0 only.
- * Fixed seed (srand(1)) to match serial / OpenMP baselines so that
- * accuracy comparisons across implementations are meaningful.
+ * Rank 0 only. Fixed seed (srand(1)) matches all other baselines.
  * ================================================================ */
 void initialize_global(void)
 {
     srand(1);
     for (int i = 0; i < ROWS; i++) {
         for (int j = 0; j < COLS; j++) {
-
             global_weather[i][j] = 1.0;
 
             /* Rain zone in centre: 0.8 = 20% density reduction */
@@ -163,7 +147,6 @@ void initialize_global(void)
             /* Accident zone in bottom-right corner: 0.5 = 50% density reduction */
             if (i > 3*ROWS/4 && j > 3*COLS/4)
                 global_weather[i][j] = 0.5;
-
             for (int l = 0; l < LANES; l++)
                 global_traffic[i][j][l] = (double)(rand() % 100);
         }
@@ -173,20 +156,17 @@ void initialize_global(void)
 
 /* ================================================================
  * distribute_data()
- * MPI_Scatterv sends each process its slice of rows from rank 0.
- * Received data is placed starting at local index 1 (index 0 is
- * reserved for the top ghost row).
+ * Rank 0 scatters rows to all processes via MPI_Scatterv.
+ * Data lands at local index 1 (index 0 is reserved for ghost row).
  * ================================================================ */
 void distribute_data(void)
 {
-    /* --- Traffic grid --- */
     MPI_Scatterv(
-        &global_traffic[0][0][0], tc, td, MPI_DOUBLE,   /* send (rank 0) */
-        &local_traffic[1][0][0],                          /* recv buffer   */
+        &global_traffic[0][0][0], tc, td, MPI_DOUBLE,
+        &local_traffic[1][0][0],
         local_rows * COLS * LANES, MPI_DOUBLE,
         0, MPI_COMM_WORLD);
 
-    /* --- Weather grid --- */
     MPI_Scatterv(
         &global_weather[0][0], wc, wd, MPI_DOUBLE,
         &local_weather[1][0],
@@ -197,43 +177,34 @@ void distribute_data(void)
 
 /* ================================================================
  * halo_exchange()
- * Non-blocking send/receive to swap boundary rows with neighbours.
- *
- * Each process:
- *   - Sends its top data row    (local[1])         to rank-1
- *   - Sends its bottom data row (local[local_rows]) to rank+1
- *   - Receives rank-1's bottom row into local[0]          (top ghost)
- *   - Receives rank+1's top row  into local[local_rows+1] (bottom ghost)
- *
- * Using MPI_Isend/MPI_Irecv avoids deadlock and allows the MPI
- * library to overlap communication with independent work.
- * MPI_Waitall ensures all transfers complete before the update step.
+ * Non-blocking exchange of boundary rows with neighbouring ranks.
+ * Identical communication pattern to the pure-MPI baseline.
  * ================================================================ */
 void halo_exchange(void)
 {
     MPI_Request reqs[4];
-    int n = 0;
+    int n    = 0;
+    int prev = rank - 1;
+    int next = rank + 1;
 
-    int prev = rank - 1;   /* rank above (lower index) */
-    int next = rank + 1;   /* rank below (higher index) */
-
-    /* Post receives first to minimise latency */
     if (prev >= 0)
-        MPI_Irecv(&local_traffic[0][0][0],            COLS * LANES, MPI_DOUBLE,
+        MPI_Irecv(&local_traffic[0][0][0],
+                  COLS * LANES, MPI_DOUBLE,
                   prev, TAG_SOUTH, MPI_COMM_WORLD, &reqs[n++]);
 
     if (next < nprocs)
-        MPI_Irecv(&local_traffic[local_rows + 1][0][0], COLS * LANES, MPI_DOUBLE,
+        MPI_Irecv(&local_traffic[local_rows + 1][0][0],
+                  COLS * LANES, MPI_DOUBLE,
                   next, TAG_NORTH, MPI_COMM_WORLD, &reqs[n++]);
 
-    /* Send top data row northward to prev */
     if (prev >= 0)
-        MPI_Isend(&local_traffic[1][0][0],            COLS * LANES, MPI_DOUBLE,
+        MPI_Isend(&local_traffic[1][0][0],
+                  COLS * LANES, MPI_DOUBLE,
                   prev, TAG_NORTH, MPI_COMM_WORLD, &reqs[n++]);
 
-    /* Send bottom data row southward to next */
     if (next < nprocs)
-        MPI_Isend(&local_traffic[local_rows][0][0],   COLS * LANES, MPI_DOUBLE,
+        MPI_Isend(&local_traffic[local_rows][0][0],
+                  COLS * LANES, MPI_DOUBLE,
                   next, TAG_SOUTH, MPI_COMM_WORLD, &reqs[n++]);
 
     MPI_Waitall(n, reqs, MPI_STATUSES_IGNORE);
@@ -242,25 +213,22 @@ void halo_exchange(void)
 
 /* ================================================================
  * update_local()
- * Apply one diffusion step to this process's owned rows.
+ * KEY HYBRID FUNCTION
  *
- * Diffusion formula (matches serial baseline exactly):
- *   new[i][j][l] = (current + 0.1*(avg_neighbours - current))
- *                  * weather[i][j]
+ * MPI provides the row slice; OpenMP threads parallelise the
+ * inner row loop so multiple threads update different rows
+ * of this process's local partition simultaneously.
  *
- * Global boundary rows (gi == 0 or gi == ROWS-1) are left unchanged,
- * matching the serial baseline which iterates i from 1 to ROWS-2.
- * Column boundaries (j == 0 and j == COLS-1) are also skipped.
- *
- * Two-phase approach (read from local_traffic, write to local_new,
- * then copy back) avoids read-after-write races.
+ * Two-phase approach (read → local_new, copy back) prevents
+ * read-after-write races across threads.
  * ================================================================ */
 void update_local(void)
 {
-    /* Phase 1: compute new densities */
+    /* Phase 1: compute new densities — OpenMP parallelises rows */
+    #pragma omp parallel for schedule(static)
     for (int li = 1; li <= local_rows; li++) {
         int gi = row_start + li - 1;        /* global row index */
-        if (gi == 0 || gi == ROWS - 1) continue;
+        if (gi == 0 || gi == ROWS - 1) continue;   /* global boundary */
 
         for (int j = 1; j < COLS - 1; j++) {
             for (int l = 0; l < LANES; l++) {
@@ -275,7 +243,8 @@ void update_local(void)
         }
     }
 
-    /* Phase 2: copy new values back */
+    /* Phase 2: copy back — also OpenMP-parallel */
+    #pragma omp parallel for schedule(static)
     for (int li = 1; li <= local_rows; li++) {
         int gi = row_start + li - 1;
         if (gi == 0 || gi == ROWS - 1) continue;
@@ -289,8 +258,7 @@ void update_local(void)
 
 /* ================================================================
  * gather_data()
- * MPI_Gatherv collects each process's owned rows back to rank 0's
- * global_traffic array for output.
+ * Collect all process slices back to rank 0.
  * ================================================================ */
 void gather_data(void)
 {
@@ -304,14 +272,15 @@ void gather_data(void)
 
 /* ================================================================
  * compute_stats()
- * Each process computes local partial min/max/sum; MPI_Reduce
- * aggregates them to rank 0.  Output pointers are only set on
- * rank 0.
+ * Each process uses OpenMP reduction for local partial stats;
+ * MPI_Reduce aggregates to rank 0 for global values.
  * ================================================================ */
 void compute_stats(double *out_min, double *out_max, double *out_avg)
 {
     double lsum = 0.0, lmin = 1e18, lmax = -1e18;
 
+    #pragma omp parallel for schedule(static) \
+            reduction(+:lsum) reduction(min:lmin) reduction(max:lmax)
     for (int li = 1; li <= local_rows; li++) {
         for (int j = 0; j < COLS; j++) {
             for (int l = 0; l < LANES; l++) {
@@ -337,23 +306,24 @@ void compute_stats(double *out_min, double *out_max, double *out_avg)
 
 
 /* ================================================================
- * save_output()  -- rank 0 only
- * Saves final traffic density matrices for all lanes.
+ * save_output()  — rank 0 only
  * ================================================================ */
-void save_output(double exec_time)
+void save_output(double exec_time, int num_omp_threads)
 {
     FILE *fp = fopen(OUTPUT_FILE, "w");
     if (!fp) { fprintf(stderr, "ERROR: Cannot open %s\n", OUTPUT_FILE); return; }
 
     fprintf(fp, "=================================================\n");
-    fprintf(fp, "  MPI Parallel Traffic Simulation Output\n");
+    fprintf(fp, "  Hybrid MPI+OpenMP Traffic Simulation Output\n");
     fprintf(fp, "  Group 10\n");
     fprintf(fp, "=================================================\n");
-    fprintf(fp, "Grid Size  : %d x %d\n",       ROWS, COLS);
-    fprintf(fp, "Lanes      : %d\n",             LANES);
-    fprintf(fp, "Time Steps : %d\n",             TIME_STEPS);
-    fprintf(fp, "Processes  : %d\n",             nprocs);
-    fprintf(fp, "Exec Time  : %.6f seconds\n\n", exec_time);
+    fprintf(fp, "Grid Size      : %d x %d\n",  ROWS, COLS);
+    fprintf(fp, "Lanes          : %d\n",         LANES);
+    fprintf(fp, "Time Steps     : %d\n",         TIME_STEPS);
+    fprintf(fp, "MPI Processes  : %d\n",         nprocs);
+    fprintf(fp, "OMP Threads    : %d  (per process)\n", num_omp_threads);
+    fprintf(fp, "Total Workers  : %d\n",         nprocs * num_omp_threads);
+    fprintf(fp, "Exec Time      : %.6f seconds\n\n", exec_time);
 
     for (int l = 0; l < LANES; l++) {
         fprintf(fp, "--- Lane %d ---\n", l);
@@ -364,15 +334,12 @@ void save_output(double exec_time)
         }
         fprintf(fp, "\n");
     }
-
     fclose(fp);
 }
 
 
 /* ================================================================
- * save_image()  -- rank 0 only
- * Saves a PPM heatmap.  Red = high density, Blue = low density.
- * Matches the serial baseline format (traffic_heatmap.ppm).
+ * save_image()  — rank 0 only
  * ================================================================ */
 void save_image(void)
 {
@@ -397,9 +364,7 @@ void save_image(void)
 
 
 /* ================================================================
- * save_raw_values()  -- rank 0 only
- * Saves lane-averaged traffic densities.
- * Same format as serial traffic_values.txt for direct comparison.
+ * save_raw_values()  — rank 0 only
  * ================================================================ */
 void save_raw_values(void)
 {
@@ -420,26 +385,27 @@ void save_raw_values(void)
 
 
 /* ================================================================
- * append_perf_line()  -- rank 0 only
- * Appends one data row to mpi_performance.txt.
- * run_scaling.sh writes the file header before the first invocation
- * so that the final file contains all np configurations together.
+ * append_perf_line()  — rank 0 only
+ * Format: Procs  Threads  Total  Time(s)  Min  Max  Avg
  * ================================================================ */
-void append_perf_line(double exec_time,
+void append_perf_line(double exec_time, int num_omp_threads,
                       double min_d, double max_d, double avg_d)
 {
     FILE *fp = fopen(PERF_FILE, "a");
     if (!fp) { fprintf(stderr, "ERROR: Cannot open %s\n", PERF_FILE); return; }
 
-    fprintf(fp, "  %-8d %-14.6f %-8.4f %-8.4f %-8.4f\n",
-            nprocs, exec_time, min_d, max_d, avg_d);
-
+    fprintf(fp, "  %-8d %-8d %-8d %-14.6f %-8.4f %-8.4f %-8.4f\n",
+            nprocs, num_omp_threads, nprocs * num_omp_threads,
+            exec_time, min_d, max_d, avg_d);
     fclose(fp);
 }
 
 
 /* ================================================================
  * main()
+ * Usage: mpirun -np <P> ./traffic_hybrid <T>
+ *        P = number of MPI processes
+ *        T = number of OpenMP threads per process (default: 1)
  * ================================================================ */
 int main(int argc, char *argv[])
 {
@@ -447,10 +413,18 @@ int main(int argc, char *argv[])
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
 
-    /* ---- Compute how many rows each process owns ---- */
+    /* ---- Parse OMP thread count from command line ---- */
+    int num_omp_threads = 1;
+    if (argc > 1) num_omp_threads = atoi(argv[1]);
+    if (num_omp_threads < 1) num_omp_threads = 1;
+
+    omp_set_dynamic(0);                       /* disable dynamic adjustment */
+    omp_set_num_threads(num_omp_threads);
+
+    /* ---- Compute row distribution ---- */
     compute_distribution();
 
-    /* ---- Allocate local arrays (+2 ghost rows) ---- */
+    /* ---- Allocate local arrays (owned rows + 2 ghost rows) ---- */
     local_traffic = (double (*)[COLS][LANES])
                     malloc((local_rows + 2) * sizeof(*local_traffic));
     local_new     = (double (*)[COLS][LANES])
@@ -462,77 +436,79 @@ int main(int argc, char *argv[])
     memset(local_new,     0, (local_rows + 2) * sizeof(*local_new));
     memset(local_weather, 0, (local_rows + 2) * sizeof(*local_weather));
 
-    /* ---- Rank 0 initialises the full grid ---- */
+    /* ---- Rank 0 initialises full grid ---- */
     if (rank == 0)
         initialize_global();
 
     /* ---- Distribute rows and weather to all processes ---- */
     distribute_data();
 
-    /* ---- Print header (rank 0 only) ---- */
+    /* ---- Print configuration (rank 0 only) ---- */
     if (rank == 0) {
         printf("\n==========================================================\n");
-        printf("  MPI Parallel Traffic Density Simulation - Group 10\n");
+        printf("  Hybrid MPI+OpenMP Traffic Density Simulation — Group 10\n");
         printf("==========================================================\n");
-        printf("[MPI Environment]\n");
-        printf("  Processes  : %d\n", nprocs);
+        printf("[Hybrid Configuration]\n");
+        printf("  MPI Processes  : %d\n",     nprocs);
+        printf("  OMP Threads    : %d  (per process)\n", num_omp_threads);
+        printf("  Total Workers  : %d\n",     nprocs * num_omp_threads);
+        printf("  Rows per proc  : ~%d\n",    ROWS / nprocs);
         printf("[Simulation Parameters]\n");
-        printf("  Grid Size  : %d x %d\n", ROWS, COLS);
-        printf("  Lanes      : %d\n",       LANES);
-        printf("  Time Steps : %d\n",       TIME_STEPS);
-        printf("  Local rows : ~%d per process\n", ROWS / nprocs);
+        printf("  Grid Size      : %d x %d\n", ROWS, COLS);
+        printf("  Lanes          : %d\n",        LANES);
+        printf("  Time Steps     : %d\n",        TIME_STEPS);
         printf("\n[Running simulation...]\n");
     }
 
-    /* ---- Synchronise all processes, then start timer ---- */
+    /* ---- Synchronise, then start wall-clock timer ---- */
     MPI_Barrier(MPI_COMM_WORLD);
     double t_start = MPI_Wtime();
 
     /* ================================================================
      * MAIN SIMULATION LOOP
-     * Each iteration:
-     *   1. halo_exchange() — fill ghost rows from neighbours
-     *   2. update_local()  — compute one diffusion step on owned rows
+     *   Step 1 : halo_exchange()  — MPI boundary row swap
+     *   Step 2 : update_local()   — OpenMP-parallel diffusion step
      * ================================================================ */
     for (int t = 0; t < TIME_STEPS; t++) {
         halo_exchange();
         update_local();
     }
 
-    /* ---- Synchronise then stop timer ---- */
+    /* ---- Synchronise, stop timer ---- */
     MPI_Barrier(MPI_COMM_WORLD);
     double exec_time = MPI_Wtime() - t_start;
 
-    /* ---- Collect all rows back to rank 0 ---- */
+    /* ---- Collect results to rank 0 ---- */
     gather_data();
 
-    /* ---- Compute global statistics via MPI_Reduce ---- */
+    /* ---- Global statistics ---- */
     double min_d = 0.0, max_d = 0.0, avg_d = 0.0;
     compute_stats(&min_d, &max_d, &avg_d);
 
-    /* ---- Rank 0: write outputs and print summary ---- */
+    /* ---- Rank 0: output files and summary ---- */
     if (rank == 0) {
         printf("[Performance]\n");
-        printf("  Exec Time  : %.6f seconds\n", exec_time);
-        printf("  Min Density: %.4f\n", min_d);
-        printf("  Max Density: %.4f\n", max_d);
-        printf("  Avg Density: %.4f\n", avg_d);
+        printf("  Exec Time      : %.6f seconds\n", exec_time);
+        printf("  Min Density    : %.4f\n", min_d);
+        printf("  Max Density    : %.4f\n", max_d);
+        printf("  Avg Density    : %.4f\n", avg_d);
 
         printf("\n[Saving Output Files]\n");
-        save_output(exec_time);
-        printf("  %-42s -> Traffic density data (all lanes)\n", OUTPUT_FILE);
+        save_output(exec_time, num_omp_threads);
+        printf("  %-42s -> Traffic density (all lanes)\n", OUTPUT_FILE);
 
         save_image();
-        printf("  %-42s -> Heatmap image (PPM format)\n", IMAGE_FILE);
+        printf("  %-42s -> Heatmap PPM image\n", IMAGE_FILE);
 
         save_raw_values();
-        printf("  %-42s -> Raw lane-averaged values\n", VALUES_FILE);
+        printf("  %-42s -> Lane-averaged values\n", VALUES_FILE);
 
-        append_perf_line(exec_time, min_d, max_d, avg_d);
+        append_perf_line(exec_time, num_omp_threads, min_d, max_d, avg_d);
         printf("  %-42s -> Performance log (appended)\n", PERF_FILE);
 
         printf("\n==========================================================\n");
-        printf("  Simulation Complete  |  %d process(es)\n", nprocs);
+        printf("  Simulation Complete  |  MPI=%d  OMP=%d  Total=%d workers\n",
+               nprocs, num_omp_threads, nprocs * num_omp_threads);
         printf("==========================================================\n\n");
     }
 
@@ -540,8 +516,7 @@ int main(int argc, char *argv[])
     free(local_traffic);
     free(local_new);
     free(local_weather);
-    free(row_counts);
-    free(row_displs);
+    free(row_counts); free(row_displs);
     free(tc); free(td);
     free(wc); free(wd);
 
