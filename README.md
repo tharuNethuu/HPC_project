@@ -179,3 +179,18 @@ python3 analysis_hybrid.py
 ---
 
 *EE7218/EC7207 High Performance Computing — Group 10*
+
+---
+
+## Traffic Dashboard
+
+A small local HTML dashboard is available in [ui/index.html](ui/index.html). It can run the benchmark targets, pick the right command path for macOS or WSL/Linux, and render the latest output files as heatmaps and performance curves.
+
+Run it with:
+
+```bash
+cd ui
+/usr/bin/python3 server.py
+```
+
+Then open `http://127.0.0.1:8000` in your browser.

@@ -70,6 +70,98 @@
 #define TAG_SOUTH  11
 
 /* ================================================================
+ * Performance tracking — upserts one row per (nprocs, threads) across runs
+ * ================================================================ */
+extern int nprocs;   /* defined in Global State below */
+#define MAX_CONFIGS 32
+typedef struct { int procs, threads; double time, lo, hi, avg; } HPerfEntry;
+static int        hperf_n;
+static HPerfEntry hperf_buf[MAX_CONFIGS];
+
+static void hperf_read(void) {
+    hperf_n = 0;
+    FILE *fp = fopen(PERF_FILE, "r");
+    if (!fp) return;
+    char line[256];
+    while (fgets(line, sizeof(line), fp) && hperf_n < MAX_CONFIGS) {
+        int p, th, tot; double t, a, b, c;
+        if (sscanf(line, " %d %d %d %lf %lf %lf %lf", &p, &th, &tot, &t, &a, &b, &c) == 7
+                && p > 0 && t > 0)
+            hperf_buf[hperf_n++] = (HPerfEntry){p, th, t, a, b, c};
+    }
+    fclose(fp);
+}
+
+static void hperf_write(void) {
+    FILE *fp = fopen(PERF_FILE, "w");
+    if (!fp) return;
+    fprintf(fp, "=================================================\n");
+    fprintf(fp, "  Hybrid MPI+OpenMP Traffic Simulation - Performance Results\n");
+    fprintf(fp, "  Group 10\n");
+    fprintf(fp, "=================================================\n");
+    fprintf(fp, "Grid: %dx%d  Lanes: %d  Time Steps: %d\n\n", ROWS, COLS, LANES, TIME_STEPS);
+    fprintf(fp, "  %-8s %-8s %-8s %-14s %-8s %-8s %-8s\n",
+            "Procs", "Threads", "Total", "Time(s)", "Min", "Max", "Avg");
+    fprintf(fp, "  --------------------------------------------------------------------------\n");
+    for (int i = 0; i < hperf_n; i++)
+        fprintf(fp, "  %-8d %-8d %-8d %-14.6f %-8.4f %-8.4f %-8.4f\n",
+                hperf_buf[i].procs, hperf_buf[i].threads,
+                hperf_buf[i].procs * hperf_buf[i].threads,
+                hperf_buf[i].time, hperf_buf[i].lo, hperf_buf[i].hi, hperf_buf[i].avg);
+    fclose(fp);
+}
+
+static void hperf_upsert(int omp_th, double t, double lo, double hi, double av) {
+    hperf_read();
+    for (int i = 0; i < hperf_n; i++) {
+        if (hperf_buf[i].procs == nprocs && hperf_buf[i].threads == omp_th) {
+            hperf_buf[i] = (HPerfEntry){nprocs, omp_th, t, lo, hi, av};
+            hperf_write(); return;
+        }
+    }
+    if (hperf_n < MAX_CONFIGS)
+        hperf_buf[hperf_n++] = (HPerfEntry){nprocs, omp_th, t, lo, hi, av};
+    for (int i = hperf_n-1; i > 0; i--) {
+        HPerfEntry *a = &hperf_buf[i], *b = &hperf_buf[i-1];
+        if (a->procs < b->procs || (a->procs == b->procs && a->threads < b->threads)) {
+            HPerfEntry tmp = *a; *a = *b; *b = tmp;
+        } else break;
+    }
+    hperf_write();
+}
+
+static void hperf_print(int omp_th, double exec_time) {
+    hperf_read();
+    double base = -1.0;
+    for (int i = 0; i < hperf_n; i++)
+        if (hperf_buf[i].procs == 1 && hperf_buf[i].threads == 1) { base = hperf_buf[i].time; break; }
+    int total = nprocs * omp_th;
+    printf("\nSelected config: %d MPI process%s x %d thread%s (%d total workers)\n",
+           nprocs, nprocs != 1 ? "es" : "",
+           omp_th, omp_th != 1 ? "s" : "", total);
+    printf("  Execution time : %.4f s\n", exec_time);
+    if (base > 0) {
+        double sp = base / exec_time, ef = sp / total;
+        printf("  Speedup        : %.4fx\n", sp);
+        printf("  Efficiency     : %.2f%%\n", ef * 100.0);
+    }
+    printf("\n=================================================\n");
+    printf("  Hybrid MPI+OpenMP Traffic Simulation - Performance Results\n");
+    printf("  Group 10\n");
+    printf("=================================================\n");
+    printf("Grid: %dx%d  Lanes: %d  Time Steps: %d\n\n", ROWS, COLS, LANES, TIME_STEPS);
+    printf("  %-8s %-8s %-8s %-14s %-8s %-8s %-8s\n",
+           "Procs", "Threads", "Total", "Time(s)", "Min", "Max", "Avg");
+    printf("  --------------------------------------------------------------------------\n");
+    for (int i = 0; i < hperf_n; i++)
+        printf("  %-8d %-8d %-8d %-14.6f %-8.4f %-8.4f %-8.4f\n",
+               hperf_buf[i].procs, hperf_buf[i].threads,
+               hperf_buf[i].procs * hperf_buf[i].threads,
+               hperf_buf[i].time, hperf_buf[i].lo, hperf_buf[i].hi, hperf_buf[i].avg);
+}
+
+
+/* ================================================================
  * Global State
  * ================================================================ */
 
@@ -384,21 +476,6 @@ void save_raw_values(void)
 }
 
 
-/* ================================================================
- * append_perf_line()  — rank 0 only
- * Format: Procs  Threads  Total  Time(s)  Min  Max  Avg
- * ================================================================ */
-void append_perf_line(double exec_time, int num_omp_threads,
-                      double min_d, double max_d, double avg_d)
-{
-    FILE *fp = fopen(PERF_FILE, "a");
-    if (!fp) { fprintf(stderr, "ERROR: Cannot open %s\n", PERF_FILE); return; }
-
-    fprintf(fp, "  %-8d %-8d %-8d %-14.6f %-8.4f %-8.4f %-8.4f\n",
-            nprocs, num_omp_threads, nprocs * num_omp_threads,
-            exec_time, min_d, max_d, avg_d);
-    fclose(fp);
-}
 
 
 /* ================================================================
@@ -452,12 +529,60 @@ int main(int argc, char *argv[])
         printf("  MPI Processes  : %d\n",     nprocs);
         printf("  OMP Threads    : %d  (per process)\n", num_omp_threads);
         printf("  Total Workers  : %d\n",     nprocs * num_omp_threads);
-        printf("  Rows per proc  : ~%d\n",    ROWS / nprocs);
         printf("[Simulation Parameters]\n");
         printf("  Grid Size      : %d x %d\n", ROWS, COLS);
         printf("  Lanes          : %d\n",        LANES);
         printf("  Time Steps     : %d\n",        TIME_STEPS);
+        printf("\n[Process & Thread Assignments]\n");
+        printf("  %-8s %-12s %-20s %-10s\n",
+               "Rank", "Rows Owned", "Global Row Range", "OMP Threads");
+        printf("  ------------------------------------------------\n");
+        fflush(stdout);
+    }
+
+    /* ---- Each rank announces itself in order ---- */
+    for (int p = 0; p < nprocs; p++) {
+        MPI_Barrier(MPI_COMM_WORLD);
+        if (rank == p) {
+            printf("  %-8d %-12d [%3d .. %3d]           %-10d\n",
+                   rank, local_rows,
+                   row_start, row_start + local_rows - 1,
+                   num_omp_threads);
+            fflush(stdout);
+        }
+    }
+    MPI_Barrier(MPI_COMM_WORLD);
+
+    /* ---- Each rank shows its OpenMP threads ---- */
+    if (rank == 0) {
+        printf("\n[OpenMP Threads per Process]\n");
+        fflush(stdout);
+    }
+    for (int p = 0; p < nprocs; p++) {
+        MPI_Barrier(MPI_COMM_WORLD);
+        if (rank == p) {
+            printf("  Rank %d threads:\n", rank);
+            #pragma omp parallel
+            {
+                int tid   = omp_get_thread_num();
+                int total = omp_get_num_threads();
+                int rows_per_thread = local_rows / total;
+                int t_row_start = row_start + tid * rows_per_thread;
+                int t_row_end   = (tid == total - 1)
+                                  ? row_start + local_rows - 1
+                                  : t_row_start + rows_per_thread - 1;
+                #pragma omp critical
+                printf("    Thread %d/%d  ->  global rows [%3d .. %3d]\n",
+                       tid, total - 1, t_row_start, t_row_end);
+            }
+            fflush(stdout);
+        }
+    }
+    MPI_Barrier(MPI_COMM_WORLD);
+
+    if (rank == 0) {
         printf("\n[Running simulation...]\n");
+        fflush(stdout);
     }
 
     /* ---- Synchronise, then start wall-clock timer ---- */
@@ -477,6 +602,22 @@ int main(int argc, char *argv[])
     /* ---- Synchronise, stop timer ---- */
     MPI_Barrier(MPI_COMM_WORLD);
     double exec_time = MPI_Wtime() - t_start;
+
+    /* ---- Each rank reports its local time ---- */
+    if (rank == 0) {
+        printf("\n[Per-Process Timing]\n");
+        printf("  %-8s %-14s %-10s\n", "Rank", "Local Time(s)", "Rows");
+        printf("  --------------------------------\n");
+        fflush(stdout);
+    }
+    for (int p = 0; p < nprocs; p++) {
+        MPI_Barrier(MPI_COMM_WORLD);
+        if (rank == p) {
+            printf("  %-8d %-14.6f %-10d\n", rank, exec_time, local_rows);
+            fflush(stdout);
+        }
+    }
+    MPI_Barrier(MPI_COMM_WORLD);
 
     /* ---- Collect results to rank 0 ---- */
     gather_data();
@@ -503,8 +644,10 @@ int main(int argc, char *argv[])
         save_raw_values();
         printf("  %-42s -> Lane-averaged values\n", VALUES_FILE);
 
-        append_perf_line(exec_time, num_omp_threads, min_d, max_d, avg_d);
-        printf("  %-42s -> Performance log (appended)\n", PERF_FILE);
+        hperf_upsert(num_omp_threads, exec_time, min_d, max_d, avg_d);
+        printf("  %-42s -> Performance log (updated)\n", PERF_FILE);
+
+        hperf_print(num_omp_threads, exec_time);
 
         printf("\n==========================================================\n");
         printf("  Simulation Complete  |  MPI=%d  OMP=%d  Total=%d workers\n",

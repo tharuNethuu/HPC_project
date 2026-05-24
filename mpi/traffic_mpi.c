@@ -2,43 +2,6 @@
 =========================================================
  FILE: traffic_mpi.c
  GROUP: 10
-
- DESCRIPTION:
-   MPI Parallel Traffic Density Simulation
-
-   Based on the serial baseline (traffic_serial.c).
-   Parallelizes the 2D multi-lane traffic diffusion model
-   using MPI distributed-memory message passing.
-
-   Strategy: 1-D row decomposition.
-   Each MPI process owns a contiguous block of rows.
-   Neighboring processes exchange boundary rows (halo
-   exchange) before every time step so the diffusion
-   stencil can be evaluated without gaps.
-
- MPI Features Demonstrated:
-   1.  MPI_Init / MPI_Finalize           (setup / teardown)
-   2.  MPI_Comm_rank / MPI_Comm_size     (process identity)
-   3.  MPI_Scatterv                      (distribute grid rows to processes)
-   4.  MPI_Gatherv                       (collect final rows to rank 0)
-   5.  MPI_Isend / MPI_Irecv             (non-blocking halo exchange)
-   6.  MPI_Waitall                       (complete non-blocking ops)
-   7.  MPI_Reduce  (MPI_SUM/MIN/MAX)     (global statistics aggregation)
-   8.  MPI_Barrier                       (synchronisation for accurate timing)
-   9.  MPI_Wtime                         (high-resolution wall-clock timer)
-
- Grid decomposition:
-   Global grid : ROWS x COLS x LANES  (all rows in rank 0's global arrays)
-   Local slice : local_rows x COLS x LANES  (+2 ghost/halo rows at top & bottom)
-   Ghost rows  : filled by halo exchange each time step
-
- Outputs (written by rank 0):
-   mpi_output.txt          : Final traffic density matrices (all lanes)
-   mpi_traffic_heatmap.ppm : Heatmap image (Red=dense, Blue=sparse)
-   mpi_traffic_values.txt  : Lane-averaged values for external visualization
-   mpi_performance.txt     : Performance data row appended each run
-                             (run_scaling.sh writes header before first run)
-
  Compile:
    mpicc -O2 -o traffic_mpi traffic_mpi.c -lm
 
@@ -70,6 +33,110 @@
 /* TAG_SOUTH : message carrying a row travelling southward (to higher rank) */
 #define TAG_NORTH  10
 #define TAG_SOUTH  11
+
+/* ================================================================
+ * Performance tracking — upserts one row per nprocs across runs
+ * ================================================================ */
+extern int nprocs;   /* defined in Global State below */
+#define MAX_CONFIGS 16
+typedef struct { int procs; double time, lo, hi, avg; } PerfEntry;
+static int       perf_n;
+static PerfEntry perf_buf[MAX_CONFIGS];
+
+static void perf_read(void) {
+    perf_n = 0;
+    FILE *fp = fopen(PERF_FILE, "r");
+    if (!fp) return;
+    char line[256];
+    while (fgets(line, sizeof(line), fp) && perf_n < MAX_CONFIGS) {
+        int p; double t, a, b, c;
+        if (sscanf(line, " %d %lf %lf %lf %lf", &p, &t, &a, &b, &c) == 5 && p > 0 && t > 0)
+            perf_buf[perf_n++] = (PerfEntry){p, t, a, b, c};
+    }
+    fclose(fp);
+}
+
+static void perf_write(void) {
+    FILE *fp = fopen(PERF_FILE, "w");
+    if (!fp) return;
+    fprintf(fp, "=================================================\n");
+    fprintf(fp, "  MPI Traffic Simulation - Performance Results\n");
+    fprintf(fp, "  Group 10\n");
+    fprintf(fp, "=================================================\n");
+    fprintf(fp, "Grid: %dx%d  Lanes: %d  Time Steps: %d\n\n", ROWS, COLS, LANES, TIME_STEPS);
+    fprintf(fp, "  %-8s %-14s %-8s %-8s %-8s\n", "Procs", "Time(s)", "Min", "Max", "Avg");
+    fprintf(fp, "  ---------------------------------------------------\n");
+    double base = -1.0;
+    for (int i = 0; i < perf_n; i++) {
+        fprintf(fp, "  %-8d %-14.6f %-8.4f %-8.4f %-8.4f\n",
+                perf_buf[i].procs, perf_buf[i].time,
+                perf_buf[i].lo, perf_buf[i].hi, perf_buf[i].avg);
+        if (perf_buf[i].procs == 1) base = perf_buf[i].time;
+    }
+    if (base > 0) {
+        fprintf(fp, "\n  Speedup and Efficiency (relative to np=1):\n\n");
+        fprintf(fp, "  %-8s %-10s %-10s\n", "Procs", "Speedup", "Efficiency");
+        fprintf(fp, "  --------------------------------\n");
+        for (int i = 0; i < perf_n; i++) {
+            double sp = base / perf_buf[i].time, ef = sp / perf_buf[i].procs;
+            fprintf(fp, "  %-8d %-10.4f %-10.4f (%.2f%%)\n",
+                    perf_buf[i].procs, sp, ef, ef * 100.0);
+        }
+    }
+    fclose(fp);
+}
+
+static void perf_upsert(double t, double lo, double hi, double av) {
+    perf_read();
+    for (int i = 0; i < perf_n; i++) {
+        if (perf_buf[i].procs == nprocs) {
+            perf_buf[i] = (PerfEntry){nprocs, t, lo, hi, av};
+            perf_write(); return;
+        }
+    }
+    if (perf_n < MAX_CONFIGS)
+        perf_buf[perf_n++] = (PerfEntry){nprocs, t, lo, hi, av};
+    for (int i = perf_n-1; i > 0 && perf_buf[i].procs < perf_buf[i-1].procs; i--) {
+        PerfEntry tmp = perf_buf[i]; perf_buf[i] = perf_buf[i-1]; perf_buf[i-1] = tmp;
+    }
+    perf_write();
+}
+
+static void perf_print(double exec_time) {
+    perf_read();
+    double base = -1.0;
+    for (int i = 0; i < perf_n; i++)
+        if (perf_buf[i].procs == 1) { base = perf_buf[i].time; break; }
+    printf("\nSelected config: %d MPI process%s\n", nprocs, nprocs != 1 ? "es" : "");
+    printf("  Execution time : %.4f s\n", exec_time);
+    if (base > 0) {
+        double sp = base / exec_time, ef = sp / nprocs;
+        printf("  Speedup        : %.4fx\n", sp);
+        printf("  Efficiency     : %.2f%%\n", ef * 100.0);
+    }
+    printf("\n=================================================\n");
+    printf("  MPI Traffic Simulation - Performance Results\n");
+    printf("  Group 10\n");
+    printf("=================================================\n");
+    printf("Grid: %dx%d  Lanes: %d  Time Steps: %d\n\n", ROWS, COLS, LANES, TIME_STEPS);
+    printf("  %-8s %-14s %-8s %-8s %-8s\n", "Procs", "Time(s)", "Min", "Max", "Avg");
+    printf("  ---------------------------------------------------\n");
+    for (int i = 0; i < perf_n; i++)
+        printf("  %-8d %-14.6f %-8.4f %-8.4f %-8.4f\n",
+               perf_buf[i].procs, perf_buf[i].time,
+               perf_buf[i].lo, perf_buf[i].hi, perf_buf[i].avg);
+    if (base > 0) {
+        printf("\n  Speedup and Efficiency (relative to np=1):\n\n");
+        printf("  %-8s %-10s %-10s\n", "Procs", "Speedup", "Efficiency");
+        printf("  --------------------------------\n");
+        for (int i = 0; i < perf_n; i++) {
+            double sp = base / perf_buf[i].time, ef = sp / perf_buf[i].procs;
+            printf("  %-8d %-10.4f %-10.4f (%.2f%%)\n",
+                   perf_buf[i].procs, sp, ef, ef * 100.0);
+        }
+    }
+}
+
 
 /* ================================================================
  * Global State
@@ -419,23 +486,6 @@ void save_raw_values(void)
 }
 
 
-/* ================================================================
- * append_perf_line()  -- rank 0 only
- * Appends one data row to mpi_performance.txt.
- * run_scaling.sh writes the file header before the first invocation
- * so that the final file contains all np configurations together.
- * ================================================================ */
-void append_perf_line(double exec_time,
-                      double min_d, double max_d, double avg_d)
-{
-    FILE *fp = fopen(PERF_FILE, "a");
-    if (!fp) { fprintf(stderr, "ERROR: Cannot open %s\n", PERF_FILE); return; }
-
-    fprintf(fp, "  %-8d %-14.6f %-8.4f %-8.4f %-8.4f\n",
-            nprocs, exec_time, min_d, max_d, avg_d);
-
-    fclose(fp);
-}
 
 
 /* ================================================================
@@ -469,7 +519,7 @@ int main(int argc, char *argv[])
     /* ---- Distribute rows and weather to all processes ---- */
     distribute_data();
 
-    /* ---- Print header (rank 0 only) ---- */
+    /* ---- Print header + per-process row assignments ---- */
     if (rank == 0) {
         printf("\n==========================================================\n");
         printf("  MPI Parallel Traffic Density Simulation - Group 10\n");
@@ -480,9 +530,21 @@ int main(int argc, char *argv[])
         printf("  Grid Size  : %d x %d\n", ROWS, COLS);
         printf("  Lanes      : %d\n",       LANES);
         printf("  Time Steps : %d\n",       TIME_STEPS);
-        printf("  Local rows : ~%d per process\n", ROWS / nprocs);
-        printf("\n[Running simulation...]\n");
+        printf("\n[Process Row Assignments]\n");
+        printf("  %-8s %-12s %-20s\n", "Rank", "Rows Owned", "Global Row Range");
+        printf("  ----------------------------------------\n");
+        fflush(stdout);
     }
+    for (int p = 0; p < nprocs; p++) {
+        MPI_Barrier(MPI_COMM_WORLD);
+        if (rank == p) {
+            printf("  %-8d %-12d [%3d .. %3d]\n",
+                   rank, local_rows, row_start, row_start + local_rows - 1);
+            fflush(stdout);
+        }
+    }
+    MPI_Barrier(MPI_COMM_WORLD);
+    if (rank == 0) { printf("\n[Running simulation...]\n"); fflush(stdout); }
 
     /* ---- Synchronise all processes, then start timer ---- */
     MPI_Barrier(MPI_COMM_WORLD);
@@ -528,8 +590,10 @@ int main(int argc, char *argv[])
         save_raw_values();
         printf("  %-42s -> Raw lane-averaged values\n", VALUES_FILE);
 
-        append_perf_line(exec_time, min_d, max_d, avg_d);
-        printf("  %-42s -> Performance log (appended)\n", PERF_FILE);
+        perf_upsert(exec_time, min_d, max_d, avg_d);
+        printf("  %-42s -> Performance log (updated)\n", PERF_FILE);
+
+        perf_print(exec_time);
 
         printf("\n==========================================================\n");
         printf("  Simulation Complete  |  %d process(es)\n", nprocs);

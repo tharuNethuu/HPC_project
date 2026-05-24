@@ -19,6 +19,121 @@
 #define NUM_CONFIGS  4
 static int thread_counts[NUM_CONFIGS] = {1, 2, 4, 8};
 
+/* ================================================================
+ * Performance tracking — upserts one row per (threads, schedule) across runs
+ * ================================================================ */
+#define OMAX_CONFIGS 32
+typedef struct {
+    int    threads;
+    char   sched[16];
+    double time, speedup, efficiency, lo, hi, avg, max_diff;
+} OPerfEntry;
+static int        operf_n;
+static OPerfEntry operf_buf[OMAX_CONFIGS];
+
+static int sched_order(const char *s) {
+    if (strcmp(s, "static")   == 0) return 0;
+    if (strcmp(s, "dynamic")  == 0) return 1;
+    if (strcmp(s, "collapse") == 0) return 2;
+    return 3;
+}
+
+static void operf_read(void) {
+    operf_n = 0;
+    FILE *fp = fopen(PERF_FILE, "r");
+    if (!fp) return;
+    char line[512];
+    while (fgets(line, sizeof(line), fp) && operf_n < OMAX_CONFIGS) {
+        int th; char sc[16]; double t, sp, ef, mn, mx, av, md;
+        if (sscanf(line, " %d %15s %lf %lf %lf %lf %lf %lf %le",
+                   &th, sc, &t, &sp, &ef, &mn, &mx, &av, &md) == 9 && th > 0 && t > 0) {
+            OPerfEntry *e = &operf_buf[operf_n++];
+            e->threads = th;
+            strncpy(e->sched, sc, 15); e->sched[15] = '\0';
+            e->time = t; e->speedup = sp; e->efficiency = ef;
+            e->lo = mn; e->hi = mx; e->avg = av; e->max_diff = md;
+        }
+    }
+    fclose(fp);
+}
+
+static void operf_write(void) {
+    FILE *fp = fopen(PERF_FILE, "w");
+    if (!fp) return;
+    fprintf(fp, "=================================================\n");
+    fprintf(fp, "  OpenMP Traffic Simulation - Performance Results\n");
+    fprintf(fp, "  Group 10\n");
+    fprintf(fp, "=================================================\n");
+    fprintf(fp, "Grid: %dx%d  Lanes: %d  Time Steps: %d\n\n", ROWS, COLS, LANES, TIME_STEPS);
+    fprintf(fp, "  %-8s %-10s %-14s %-10s %-12s %-8s %-8s %-8s %-14s\n",
+            "Threads", "Schedule", "Time(s)", "Speedup", "Efficiency",
+            "Min", "Max", "Avg", "MaxDiff(vs1T)");
+    fprintf(fp, "  ------------------------------------------------------------------------------------\n");
+    for (int i = 0; i < operf_n; i++)
+        fprintf(fp, "  %-8d %-10s %-14.6f %-10.4f %-12.4f %-8.4f %-8.4f %-8.4f %-14.2e\n",
+                operf_buf[i].threads, operf_buf[i].sched,
+                operf_buf[i].time, operf_buf[i].speedup, operf_buf[i].efficiency,
+                operf_buf[i].lo, operf_buf[i].hi, operf_buf[i].avg, operf_buf[i].max_diff);
+    fclose(fp);
+}
+
+static void operf_upsert(int th, const char *sc, double t, double sp, double ef,
+                          double lo, double hi, double av, double md) {
+    operf_read();
+    int idx = -1;
+    for (int i = 0; i < operf_n; i++) {
+        if (operf_buf[i].threads == th && strcmp(operf_buf[i].sched, sc) == 0) {
+            idx = i; break;
+        }
+    }
+    if (idx < 0 && operf_n < OMAX_CONFIGS) idx = operf_n++;
+    if (idx >= 0) {
+        OPerfEntry *e = &operf_buf[idx];
+        e->threads = th; strncpy(e->sched, sc, 15); e->sched[15] = '\0';
+        e->time = t; e->speedup = sp; e->efficiency = ef;
+        e->lo = lo; e->hi = hi; e->avg = av; e->max_diff = md;
+    }
+    /* Insertion sort by (schedule order, threads) */
+    for (int i = 1; i < operf_n; i++) {
+        OPerfEntry key = operf_buf[i];
+        int ki = sched_order(key.sched), j = i - 1;
+        while (j >= 0) {
+            int ji = sched_order(operf_buf[j].sched);
+            if (ji > ki || (ji == ki && operf_buf[j].threads > key.threads)) {
+                operf_buf[j+1] = operf_buf[j]; j--;
+            } else break;
+        }
+        operf_buf[j+1] = key;
+    }
+    operf_write();
+}
+
+static void operf_print(int sel_threads, const char *sel_sched,
+                         double sel_time, double sel_speedup, double sel_efficiency) {
+    operf_read();
+    if (sel_threads > 0) {
+        printf("\nSelected config: %d thread%s / %s schedule\n",
+               sel_threads, sel_threads != 1 ? "s" : "", sel_sched);
+        printf("  Execution time : %.4f s\n", sel_time);
+        printf("  Speedup        : %.4fx\n",  sel_speedup);
+        printf("  Efficiency     : %.2f%%\n", sel_efficiency * 100.0);
+    }
+    printf("\n=================================================\n");
+    printf("  OpenMP Traffic Simulation - Performance Results\n");
+    printf("  Group 10\n");
+    printf("=================================================\n");
+    printf("Grid: %dx%d  Lanes: %d  Time Steps: %d\n\n", ROWS, COLS, LANES, TIME_STEPS);
+    printf("  %-8s %-10s %-14s %-10s %-12s %-8s %-8s %-8s %-14s\n",
+           "Threads", "Schedule", "Time(s)", "Speedup", "Efficiency",
+           "Min", "Max", "Avg", "MaxDiff(vs1T)");
+    printf("  ------------------------------------------------------------------------------------\n");
+    for (int i = 0; i < operf_n; i++)
+        printf("  %-8d %-10s %-14.6f %-10.4f %-12.4f %-8.4f %-8.4f %-8.4f %-14.2e\n",
+               operf_buf[i].threads, operf_buf[i].sched,
+               operf_buf[i].time, operf_buf[i].speedup, operf_buf[i].efficiency,
+               operf_buf[i].lo, operf_buf[i].hi, operf_buf[i].avg, operf_buf[i].max_diff);
+}
+
 double traffic[ROWS][COLS][LANES];
 double new_traffic[ROWS][COLS][LANES];
 double weather[ROWS][COLS];
@@ -208,8 +323,7 @@ void save_raw_values(const char *filename) {
     fclose(fp);
 }
 
-void run_scalability_test(FILE *perf_fp,
-                          void (*update_fn)(void),
+void run_scalability_test(void (*update_fn)(void),
                           const char *sched_name,
                           double *base_time_out) {
     double base_time = 0.0;
@@ -247,15 +361,73 @@ void run_scalability_test(FILE *perf_fp,
         printf("  %-8d %-14.6f %-10.4f %-12.4f %-18.2e\n",
                nt, exec_time, speedup, efficiency, max_diff);
 
-        fprintf(perf_fp, "  %-8d %-10s %-14.6f %-10.4f %-12.4f %-8.4f %-8.4f %-8.4f %-14.2e\n",
-                nt, sched_name, exec_time, speedup, efficiency,
-                min_d, max_d, avg_d, max_diff);
+        operf_upsert(nt, sched_name, exec_time, speedup, efficiency, min_d, max_d, avg_d, max_diff);
     }
 
     *base_time_out = base_time;
 }
 
-int main() {
+void run_single_configuration(int num_threads, const char *sched_name) {
+    void (*update_fn)(void) = update_static;
+    if (strcmp(sched_name, "dynamic") == 0) {
+        update_fn = update_dynamic;
+    } else if (strcmp(sched_name, "collapse") == 0) {
+        update_fn = update_collapse;
+    }
+
+    double base_time, start, end, exec_time;
+    double min_d, max_d, avg_d;
+
+    omp_set_num_threads(1);
+    initialize();
+    start = omp_get_wtime();
+    for (int t = 0; t < TIME_STEPS; t++)
+        update_fn();
+    end = omp_get_wtime();
+    base_time = end - start;
+
+    omp_set_num_threads(num_threads);
+    initialize();
+    start = omp_get_wtime();
+    for (int t = 0; t < TIME_STEPS; t++)
+        update_fn();
+    end = omp_get_wtime();
+    exec_time = end - start;
+
+    double speedup = base_time / exec_time;
+    double efficiency = speedup / (double)num_threads;
+    compute_stats(&min_d, &max_d, &avg_d);
+
+    operf_upsert(num_threads, sched_name, exec_time, speedup, efficiency, min_d, max_d, avg_d, 0.0);
+
+    save_output(exec_time, num_threads, sched_name, speedup, efficiency);
+    save_image(IMAGE_FILE);
+    save_raw_values(VALUES_FILE);
+
+    operf_print(num_threads, sched_name, exec_time, speedup, efficiency);
+    printf("\nOutput files updated: %s, %s, %s, %s\n",
+           OUTPUT_FILE, VALUES_FILE, IMAGE_FILE, PERF_FILE);
+}
+
+int main(int argc, char *argv[]) {
+    if (argc > 1) {
+        int selected_threads = atoi(argv[1]);
+        if (selected_threads < 1) selected_threads = 1;
+        const char *selected_schedule = "static";
+        if (argc > 2) {
+            if (strcmp(argv[2], "dynamic") == 0 || strcmp(argv[2], "collapse") == 0 || strcmp(argv[2], "static") == 0) {
+                selected_schedule = argv[2];
+            }
+        }
+
+        printf("\n==========================================================\n");
+        printf("  OpenMP Traffic Density Simulation - Single Config Run\n");
+        printf("==========================================================\n");
+        omp_set_dynamic(0);
+        run_single_configuration(selected_threads, selected_schedule);
+        return 0;
+    }
+
     double start, end, exec_time;
     double min_d, max_d, avg_d;
 
@@ -288,36 +460,15 @@ int main() {
     for (int i = 0; i < NUM_CONFIGS; i++)
         printf("%d%s", thread_counts[i], i < NUM_CONFIGS - 1 ? ", " : "\n");
 
-    FILE *perf_fp = fopen(PERF_FILE, "w");
-    if (!perf_fp) { fprintf(stderr, "ERROR: Cannot open %s\n", PERF_FILE); return 1; }
-
-    fprintf(perf_fp, "=================================================\n");
-    fprintf(perf_fp, "  OpenMP Traffic Simulation - Performance Results\n");
-    fprintf(perf_fp, "  Group 10\n");
-    fprintf(perf_fp, "=================================================\n");
-    fprintf(perf_fp, "Grid: %dx%d  Lanes: %d  Time Steps: %d\n\n",
-            ROWS, COLS, LANES, TIME_STEPS);
-    fprintf(perf_fp, "  %-8s %-10s %-14s %-10s %-12s %-8s %-8s %-8s %-14s\n",
-            "Threads", "Schedule", "Time(s)", "Speedup",
-            "Efficiency", "Min", "Max", "Avg", "MaxDiff(vs1T)");
-    fprintf(perf_fp, "  ------------------------------------------------------------------------------------\n");
-
     printf("\n[Scalability Analysis]\n");
     printf("  Grid: %dx%d | Lanes: %d | Time Steps: %d\n",
            ROWS, COLS, LANES, TIME_STEPS);
 
     double base_static, base_dynamic, base_collapse;
 
-    run_scalability_test(perf_fp, update_static,   "static",   &base_static);
-    run_scalability_test(perf_fp, update_dynamic,  "dynamic",  &base_dynamic);
-    run_scalability_test(perf_fp, update_collapse, "collapse", &base_collapse);
-
-    fprintf(perf_fp, "\n[Performance Notes]\n");
-    fprintf(perf_fp, "  Speedup    = T(1 thread) / T(N threads)\n");
-    fprintf(perf_fp, "  Efficiency = Speedup / N_threads  [ideal = 1.0 = 100%%]\n");
-    fprintf(perf_fp, "  MaxDiff    = max|traffic_N[i][j][l] - traffic_1[i][j][l]|\n");
-    fprintf(perf_fp, "               Expected: 0.00e+00 (deterministic computation)\n");
-    fclose(perf_fp);
+    run_scalability_test(update_static,   "static",   &base_static);
+    run_scalability_test(update_dynamic,  "dynamic",  &base_dynamic);
+    run_scalability_test(update_collapse, "collapse", &base_collapse);
 
     int best_threads = thread_counts[NUM_CONFIGS - 1];
     omp_set_num_threads(best_threads);

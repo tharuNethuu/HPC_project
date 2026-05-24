@@ -6,7 +6,7 @@ Features:
 - Multi-lane traffic grid
 - Weather effects
 - Iterative time stepping
-- Execution time measurement (omp_get_wtime)
+ - Execution time measurement using a portable wall-clock timer
 - Output saved to file
 - Heatmap image output (PPM format)
 =========================================================
@@ -15,7 +15,7 @@ Features:
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
-#include <omp.h>
+#include <sys/time.h>
 
 #define ROWS 200
 #define COLS 200
@@ -29,6 +29,12 @@ Features:
 double traffic[ROWS][COLS][LANES];
 double new_traffic[ROWS][COLS][LANES];
 double weather[ROWS][COLS];
+
+double now_seconds() {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (double)tv.tv_sec + (double)tv.tv_usec / 1000000.0;
+}
 
 // Initialize traffic and weather
 void initialize() {
@@ -179,13 +185,13 @@ int main() {
     printf("Initializing traffic simulation...\n");
     initialize();
 
-    double start = omp_get_wtime();
+    double start = now_seconds();
 
     for(int t = 0; t < TIME_STEPS; t++) {
         update();
     }
 
-    double end = omp_get_wtime();
+    double end = now_seconds();
     double exec_time = end - start;
 
     printf("Simulation completed.\n");
